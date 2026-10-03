@@ -1,0 +1,55 @@
+﻿{
+    "name":  "alaya-database",
+    "version":  "0.7.10",
+    "description":  "Alaya Database - the standalone vault core (CLI, MCP, local RPC and DSH plugin). The notebook is an extension hosted by the Alaya desktop app, deliberately not part of this repository.",
+    "type":  "module",
+    "main":  "index.js",
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client.js",
+                    "./core":  "./src/core/vault.js",
+                    "./core/ops":  "./src/core/ops.js",
+                    "./mcp":  "./src/mcp.js",
+                    "./package.json":  "./package.json"
+                },
+    "bin":  {
+                "memory-vault":  "bin/memory-vault.mjs"
+            },
+    "files":  [
+                  "index.js",
+                  "client.js",
+                  "bin",
+                  "src",
+                  "docs",
+                  "cordis.patch.yml",
+                  "README.md",
+                  "README.zh.md"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-ui-layout",
+                                              "@deepseek-ai/dsh-client-ui-sidebar"
+                                          ]
+                           }
+            },
+    "peerDependencies":  {
+                             "@deepseek-ai/cordis":  "*"
+                         },
+    "peerDependenciesMeta":  {
+                                 "@deepseek-ai/cordis":  {
+                                                             "optional":  true
+                                                         }
+                             },
+    "engines":  {
+                    "node":  "\u003e=22.5.0"
+                },
+    "scripts":  {
+                    "test":  "node --no-warnings tests/smoke.mjs \u0026\u0026 node --no-warnings tests/core-smoke.mjs \u0026\u0026 node --no-warnings tests/serve-real.mjs \u0026\u0026 node --no-warnings tests/mcp-smoke.mjs \u0026\u0026 node --no-warnings tests/standalone-smoke.mjs \u0026\u0026 node --no-warnings tests/updates-smoke.mjs \u0026\u0026 node --no-warnings tests/images-smoke.mjs",
+                    "mcp":  "node --no-warnings bin/memory-vault.mjs mcp"
+                }
+}
