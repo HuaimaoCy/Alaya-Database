@@ -406,7 +406,7 @@ function entryView(row) {
 export class MemoryStore {
   #db
   #closed = false
-  /** The open connection, shared read-only with extensions hosted in this same database. */
+  /** The open connection, shared read-only with extensions (the notebook) hosted in this same database. */
   get db() { return this.#db }
   /** How many `transaction()` calls the current call stack is inside. */
   #depth = 0
