@@ -1,0 +1,59 @@
+{
+  "name": "dsh-memory-vault",
+  "version": "0.7.15",
+  "description": "Independent knowledge and memory vault with a desktop app, Codex MCP, a DSH plugin, CLI and local RPC sharing one SQLite database.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./core": "./src/core/vault.js",
+    "./core/ops": "./src/core/ops.js",
+    "./mcp": "./src/mcp.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "memory-vault": "bin/memory-vault.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "bin",
+    "src",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --no-warnings tests/smoke.mjs && node --no-warnings tests/core-smoke.mjs && node --no-warnings tests/serve-real.mjs && node --no-warnings tests/desktop-smoke.mjs && node --no-warnings tests/mcp-smoke.mjs && node --no-warnings tests/standalone-smoke.mjs && node --no-warnings tests/updates-smoke.mjs && node --no-warnings tests/images-smoke.mjs",
+    "desktop": "npm --prefix desktop start",
+    "build:desktop": "npm --prefix desktop run build",
+    "mcp": "node --no-warnings bin/memory-vault.mjs mcp",
+    "test:mistakebook": "node --no-warnings tests/mistakebook-smoke.mjs",
+    "test:notebook": "node --no-warnings tests/notebook-smoke.mjs"
+  }
+}
