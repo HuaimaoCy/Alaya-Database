@@ -1,6 +1,6 @@
 {
     "name":  "alaya-database",
-    "version":  "0.7.10",
+    "version":  "0.7.15",
     "description":  "Alaya Database - the standalone vault core (CLI, MCP, local RPC and DSH plugin). The notebook is an extension hosted by the Alaya desktop app, deliberately not part of this repository.",
     "type":  "module",
     "main":  "index.js",
@@ -22,8 +22,7 @@
                   "src",
                   "docs",
                   "cordis.patch.yml",
-                  "README.md",
-                  "README.zh.md"
+                  "README.md"
               ],
     "dsh":  {
                 "bundle":  {
