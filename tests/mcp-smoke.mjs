@@ -83,11 +83,21 @@ export async function exerciseMcp(command, args, databasePath, environment = {})
     const summary = await call('memory_summarize', { content: '已验证的结论。', title: '总结', sessionId: 'task-a' })
     assert.equal(summary.entry.source, 'model-write')
     assert.equal(summary.entry.sessionId, 'task-a')
+    // The host limits the skill teaches are real over MCP: no model adapter is
+    // wired here, so curation is refused and summarize needs caller content.
+    // The curation refusal names whichever gap it hit first — no route, or no
+    // adapter behind one — so both spellings are accepted here.
+    const refusedCurate = await request('tools/call', { name: 'memory_curate', arguments: { action: 'review', sessionId: 'task-a' } })
+    assert.equal(refusedCurate.result.isError, true)
+    assert.match(refusedCurate.result.content[0].text, /没有可用的 provider\/model|没有接入模型服务/)
+    const noContent = await request('tools/call', { name: 'memory_summarize', arguments: { sessionId: 'task-b' } })
+    assert.equal(noContent.result.isError, true)
+    assert.ok(noContent.result.content[0].text.includes('content'))
     const invalid = await request('tools/call', { name: 'memory_group', arguments: { action: 'delete', id: 'unknown' } })
     assert.equal(invalid.result.isError, true)
     assert.equal((await request('unknown')).error.code, -32601)
     assert.deepEqual((await request('ping')).result, {})
-    console.log('MCP: initialization, schemas, Unicode framing, tools, session isolation, shared DB and shutdown passed')
+    console.log('MCP: initialization, schemas, Unicode framing, tools, session isolation, shared DB, host limits and shutdown passed')
   } finally {
     child.stdin.end()
     const timeout = setTimeout(() => child.kill(), 3000)

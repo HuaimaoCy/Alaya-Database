@@ -24,7 +24,7 @@
  */
 
 import { createServer } from 'node:http'
-import { copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { IMAGE_MAX_BYTES } from '../src/images.js'
@@ -162,7 +162,7 @@ export function usage() {
     '',
     '命令:',
     '  mcp [--session <id>]                              启动供 Codex 使用的 stdio MCP 接口',
-    '  skill [print|path|install] [--dir <目录>]          管理供 Codex 使用的技能：print 输出内容，install 装到 ~/.codex/skills',
+    '  skill [print|path|install] [--dir <目录>]          管理 Codex 技能：print 输出内容，path 显示路径，install 装进 ~/.codex/skills（--dir 仅 install 使用）',
     '  state                                             记忆库总览：统计、记忆组、标签、限额',
     '  groups [--scope conversation|knowledge]           列出记忆组（树形）',
     '  recall [--query q] [--group g] [--tag t]… [--scope s] [--limit n] [--offset n] [--include-hidden]',
@@ -478,10 +478,17 @@ export async function runCli(argv, io = {}) {
         return 0
       }
       if (plan.skillAction === 'install') {
+        // An empty `--dir ""` (a shell variable that expanded to nothing) would
+        // join into a relative path and quietly install into the working
+        // directory, so it is refused instead of silently falling back.
+        if (plan.skillRoot !== undefined && plan.skillRoot.trim() === '') {
+          throw new Error('--dir 不能为空值；省略该参数则安装到默认的 ~/.codex/skills')
+        }
         const target = join(plan.skillRoot ?? defaultSkillRoot(), SKILL_NAME, 'SKILL.md')
+        const overwritten = existsSync(target)
         mkdirSync(dirname(target), { recursive: true })
         copyFileSync(source, target)
-        stdout(`${JSON.stringify({ installed: true, name: SKILL_NAME, source, target }, null, 2)}\n`)
+        stdout(`${JSON.stringify({ installed: true, overwritten, name: SKILL_NAME, source, target }, null, 2)}\n`)
         return 0
       }
       stdout(`${JSON.stringify({ name: SKILL_NAME, path: source, content: readFileSync(source, 'utf8') }, null, 2)}\n`)

@@ -46,17 +46,17 @@ MCP 与 DSH 插件的关键差异：**这里不会自动向系统提示注入任
 
 **优先级与预算。** 优先级 0–100，越高越先注入。单任务注入预算：12 条、2400 字符——超预算的组会被截断，完整内容用 `memory_recall` 检索。真正重要的长期约定可设 `base: true`（底层 prompt，每次注入且不占预算）。
 
-**记忆组。** 最多三层嵌套；应用父组会连子组一起应用。改挂用 `memory_group` 的 parent 参数（传空字符串表示移到顶层）。
+**记忆组。** 最多 3 层嵌套；应用父组会连子组一起应用。改挂用 `memory_group` 的 parent 参数（传空字符串表示移到顶层）。
 
 **隐藏可逆。** `memory_assign` hidden=true 只是下架（默认不再出现在检索与提示里），随时可恢复；不要用它代替删除判断。
 
 ## 检索技巧
 
-`memory_recall` 的 query 是多关键词 AND（全部命中才返回），默认上限 20 条（可传 limit，最高 200）。只看标题做目录浏览时传 `withContent: false`。按组检索默认连带子组。系统标签「AI自动总结」「人工输入」可用于按来源过滤。
+`memory_recall` 的 query 是多关键词 AND（全部命中才返回），默认上限 20 条（可传 limit，最高 200）。只看标题做目录浏览时传 `withContent: false`。按组检索默认连带子组。系统标签「AI 生成」「人工输入」可用于按来源过滤。
 
 ## 无 MCP 时的逃生通道（CLI）
 
-数据库是共享的，Codex 没配 MCP 也能直接用 CLI 操作同一文件（数据库路径默认 `$DSH_HOME/memory-vault/vault.sqlite`，或 `$MEMORY_VAULT_DB`）：
+数据库是共享的，Codex 没配 MCP 也能直接用 CLI 操作同一文件（数据库路径默认 `$DSH_HOME/memory-vault/vault.sqlite`，未设时回退 `~/.dsh`；也可用 `$MEMORY_VAULT_DB` 指定）：
 
 ```bash
 node bin/memory-vault.mjs recall --query "发布 流程"

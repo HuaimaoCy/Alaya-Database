@@ -2,6 +2,10 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { CONFIG_DEFAULTS } from '../src/config.js'
+import { LIMITS } from '../src/policy.js'
+import { IMAGE_MAX_BYTES } from '../src/images.js'
+import { GROUP_MAX_DEPTH } from '../src/store.js'
 import { createMemoryVault } from '../src/core/vault.js'
 import { buildTools } from '../src/tools.js'
 import { runCli } from '../bin/memory-vault.mjs'
@@ -49,20 +53,41 @@ for (const key of Object.keys(frontmatter)) {
   assert.ok(KNOWN_FRONTMATTER_KEYS.includes(key), `unknown frontmatter key "${key}"`)
 }
 
-// 2. Every memory_* tool the skill names must exist in the MCP tool set, so a
-//    renamed tool turns this test red instead of teaching Codex a dead name.
+// 2. Every memory_* tool the skill names must exist in the MCP tool set, and
+//    every MCP tool must be taught — a renamed tool and a silently dropped
+//    chapter are both drift this guard refuses.
 const vault = createMemoryVault({ databasePath: ':memory:' })
 try {
   const mcpTools = buildTools({ ...vault, summarize: request => vault.summarize({ ...request, source: 'model-write' }) })
     .map(definition => definition.name)
   mcpTools.push('memory_context')
   const mentioned = [...new Set(skillText.match(/memory_[a-z_]+/g) ?? [])]
-  assert.ok(mentioned.length >= 9, 'the skill should reference the tool vocabulary')
   for (const name of mentioned) {
     assert.ok(mcpTools.includes(name), `SKILL.md mentions "${name}" which is not an MCP tool`)
   }
+  for (const name of mcpTools) {
+    assert.ok(mentioned.includes(name), `SKILL.md never teaches the MCP tool "${name}"`)
+  }
 } finally {
   vault.dispose()
+}
+
+// 2b. The numbers the skill teaches must track the constants the code
+//     enforces, so tuning a limit without updating the skill turns this red.
+const numberFacts = [
+  `${String(CONFIG_DEFAULTS.maxEntryChars)} 字符`,
+  `${String(LIMITS.title)} 字符`,
+  `${String(LIMITS.tag)} 字符`,
+  `${String(LIMITS.tags)} 个标签`,
+  `${String(LIMITS.batch)} 条`,
+  `${String(CONFIG_DEFAULTS.applyMaxEntries)} 条`,
+  `${String(CONFIG_DEFAULTS.applyMaxChars)} 字符`,
+  `${String(CONFIG_DEFAULTS.searchLimit)} 条`,
+  `${String(GROUP_MAX_DEPTH)} 层`,
+  `${String(IMAGE_MAX_BYTES / (1024 * 1024))} MB`,
+]
+for (const fact of numberFacts) {
+  assert.ok(skillText.includes(fact), `SKILL.md no longer states "${fact}" — the constant moved and the skill did not`)
 }
 
 // 3. `skill` never opens the database: with MEMORY_VAULT_DB pointing at a path
@@ -92,13 +117,19 @@ try {
   const root = join(dir, 'skills')
   const first = await cli(['skill', 'install', '--dir', root])
   assert.equal(first.code, 0, first.err)
+  assert.equal(JSON.parse(first.out).overwritten, false, 'a fresh install is not an overwrite')
   const installedPath = join(root, 'alaya-database', 'SKILL.md')
   assert.ok(existsSync(installedPath), 'skill install writes SKILL.md under --dir')
   assert.equal(readFileSync(installedPath, 'utf8'), skillText, 'installed copy matches the source')
 
   const again = await cli(['skill', 'install', '--dir', root])
   assert.equal(again.code, 0, again.err)
+  assert.equal(JSON.parse(again.out).overwritten, true, 'reinstall reports the overwrite')
   assert.equal(readFileSync(installedPath, 'utf8'), skillText, 'install is idempotent')
+
+  const emptyDir = await cli(['skill', 'install', '--dir', ''])
+  assert.equal(emptyDir.code, 1, 'an empty --dir must be refused, not installed into the working directory')
+  assert.ok(emptyDir.err.includes('--dir 不能为空值'))
 
   assert.ok(!existsSync(untouchedDb), 'no skill subcommand may create a database')
 } finally {
