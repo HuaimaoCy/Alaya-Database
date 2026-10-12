@@ -34,17 +34,20 @@
 
 ## 安装
 
-三条入口，共用同一个数据库：
+三条数据入口，共用同一个数据库；第四项把使用规范装进 Codex：
 
 ```bash
 # 1) DSH 插件（在 DSH 源码 checkout 根目录执行，路径替换为本机实际位置）
 pnpm dsh plugin --profile web add '<本机路径>\dsh-memory-vault'
 
-# 2) Codex MCP
-node bin/memory-vault.mjs mcp
+# 2) Codex MCP（注册后 Codex 会话中出现 memory_* 工具）
+codex mcp add memory-vault -- node bin/memory-vault.mjs mcp
 
 # 3) CLI
 node bin/memory-vault.mjs help
+
+# 4) Codex skill（把 Alaya 的使用规范装到 ~/.codex/skills，配合 2) 使用）
+node bin/memory-vault.mjs skill install
 ```
 
 ## 配置

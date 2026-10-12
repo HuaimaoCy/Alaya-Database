@@ -24,10 +24,11 @@
  */
 
 import { createServer } from 'node:http'
-import { readFileSync, statSync } from 'node:fs'
-import { basename } from 'node:path'
+import { copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import { IMAGE_MAX_BYTES } from '../src/images.js'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createMemoryVault } from '../src/core/vault.js'
 import { VAULT_OPS, operateVault } from '../src/core/ops.js'
 import { serveMcp } from '../src/mcp.js'
@@ -35,6 +36,25 @@ import { serveMcp } from '../src/mcp.js'
 /** Default port for `serve`; loopback only unless explicitly overridden. */
 const DEFAULT_PORT = 47321
 const DEFAULT_HOST = '127.0.0.1'
+
+/** The Codex skill this package ships; installed by `memory-vault skill install`. */
+const SKILL_NAME = 'alaya-database'
+
+/**
+ * Absolute path of the shipped SKILL.md.
+ * @returns {string} The skill file inside this package.
+ */
+function skillPath() {
+  return fileURLToPath(new URL(`../skills/${SKILL_NAME}/SKILL.md`, import.meta.url))
+}
+
+/**
+ * Where `skill install` puts the skill when nothing else was configured.
+ * @returns {string} The user's Codex skills directory.
+ */
+function defaultSkillRoot() {
+  return join(homedir(), '.codex', 'skills')
+}
 
 /** Header every RPC caller must set — the same marker the DSH panel uses, so a cross-site form post cannot reach the vault either. */
 const CLIENT_HEADER = 'x-dsh-memory-vault'
@@ -142,6 +162,7 @@ export function usage() {
     '',
     '命令:',
     '  mcp [--session <id>]                              启动供 Codex 使用的 stdio MCP 接口',
+    '  skill [print|path|install] [--dir <目录>]          管理供 Codex 使用的技能：print 输出内容，install 装到 ~/.codex/skills',
     '  state                                             记忆库总览：统计、记忆组、标签、限额',
     '  groups [--scope conversation|knowledge]           列出记忆组（树形）',
     '  recall [--query q] [--group g] [--tag t]… [--scope s] [--limit n] [--offset n] [--include-hidden]',
@@ -207,7 +228,7 @@ function vaultFrom(flags) {
  * the mapping lives, so the CLI can never drift from what the panel serves.
  * @param {string} command - Command word.
  * @param {{ positionals: string[], flags: Map<string, (string|true)[]> }} parsed - Parsed arguments.
- * @returns {{ body: Record<string, unknown>, vault?: Record<string, any> } | { direct: 'summarize'|'observe'|'threshold'|'show'|'serve'|'help', … }} The operation to run.
+ * @returns {{ body: Record<string, unknown>, vault?: Record<string, any> } | { direct: 'summarize'|'observe'|'threshold'|'show'|'serve'|'mcp'|'skill'|'help', … }} The operation to run.
  */
 function commandToOp(command, parsed) {
   const { positionals, flags } = parsed
@@ -406,6 +427,13 @@ function commandToOp(command, parsed) {
       return { direct: 'serve' }
     case 'mcp':
       return { direct: 'mcp' }
+    case 'skill': {
+      const action = positionals[0] ?? 'print'
+      if (action !== 'print' && action !== 'path' && action !== 'install') {
+        throw new Error(`未知的 skill 子命令「${action}」；可用：print / path / install`)
+      }
+      return { direct: 'skill', skillAction: action, skillRoot: option(flags, 'dir') }
+    }
     case 'help':
     case '--help':
     case '-h':
@@ -438,6 +466,25 @@ export async function runCli(argv, io = {}) {
     const plan = commandToOp(command, parsed)
     if ('direct' in plan && plan.direct === 'help') {
       stdout(`${usage()}\n`)
+      return 0
+    }
+    // The skill ships inside this package and never touches the vault, so it
+    // runs before any database is opened — `skill print` works on a machine
+    // with no database at all.
+    if ('direct' in plan && plan.direct === 'skill') {
+      const source = skillPath()
+      if (plan.skillAction === 'path') {
+        stdout(`${JSON.stringify({ name: SKILL_NAME, path: source }, null, 2)}\n`)
+        return 0
+      }
+      if (plan.skillAction === 'install') {
+        const target = join(plan.skillRoot ?? defaultSkillRoot(), SKILL_NAME, 'SKILL.md')
+        mkdirSync(dirname(target), { recursive: true })
+        copyFileSync(source, target)
+        stdout(`${JSON.stringify({ installed: true, name: SKILL_NAME, source, target }, null, 2)}\n`)
+        return 0
+      }
+      stdout(`${JSON.stringify({ name: SKILL_NAME, path: source, content: readFileSync(source, 'utf8') }, null, 2)}\n`)
       return 0
     }
     vault = vaultFrom(parsed.flags)
