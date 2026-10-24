@@ -93,19 +93,50 @@ $alaya-database 记住：每次发布之前都要运行回归测试。存入「�
 | `npm test` | 全套，含临时 Codex 目录的配置、回滚、幂等、快捷录入默认值与真实 stdio 写入/检索 | 否，全部用临时目录与临时数据库 |
 | `npm run test:plugin` | 清单字段、相对路径可移植性、marketplace 入口、`codex plugin` 报告，以及在**含空格与中文的插件根**里真实启动 MCP 写入/检索 | 否 |
 | `npm run test:codex-cli` | 用本机 `codex` 在临时 `CODEX_HOME` 里真跑 marketplace/plugin 安装与卸载、配置保留、解析出的启动描述符，并用它启动 MCP 写入/检索 | 否，`CODEX_HOME` 与数据库都在临时目录；找不到 `codex` 时跳过 |
+| `codex exec`（真实模型回合，手动） | 真实客户端 + 真实模型发现并调用 `memory_*`：`memory_group` 列组 → `memory_write` 写入 → `memory_recall` 读回 | 否，`MEMORY_VAULT_DB` 指向真实库的**临时副本**；真实库 size/mtime 未变 |
+
+## 自动化（`codex exec`）里的审批
+
+MCP 工具调用在非交互模式下默认需要审批。用 `codex exec -s read-only`（审批策略为 never）时，第一次工具调用会被拒：
+
+```text
+MCP tool call requires approval, but approval policy is never
+```
+
+三种可用做法：
+
+```bash
+# 1) 让 Codex 自动评审审批请求（脚本/CI 推荐；sandbox 为 workspace-write）
+codex exec --approve-for-me --json "用 memory_recall 查一下发布约定"
+
+# 2) 显式放行（只在已经外部隔离的环境里用）
+codex exec --dangerously-bypass-approvals-and-sandbox "…"
+
+# 3) 交互会话里手动批准（最安全，也是日常用法）
+codex
+```
+
+想在不碰真实记忆库的前提下验证，可把数据库指向副本（`MEMORY_VAULT_DB` 在该插件的环境变量白名单里会透传给 MCP）：
+
+```powershell
+Copy-Item "$env:USERPROFILE\.dsh\memory-vault\vault.sqlite*" $env:TEMP\alaya-copy\ -Force
+$env:MEMORY_VAULT_DB = "$env:TEMP\alaya-copy\vault.sqlite"
+codex exec --approve-for-me "用 memory_write 写一条测试记忆，再用 memory_recall 读回来"
+```
 
 ## 已验证与未验证
 
-已验证（本机 codex-cli 0.163.0-alpha.11.1，临时目录）：
+已验证（本机 codex-cli 0.163.0-alpha.11.2，临时目录）：
 
 - 本地 marketplace 添加、插件安装/卸载、配置原内容保留、重复执行幂等、未知插件被拒且不写配置。
 - 客户端解析出的启动描述符（命令、相对参数、`cwd` 落在安装副本上）确实能启动 stdio MCP，并完成写入与检索。
 - 清单字段与同机 19 个官方插件一致（`name`/`version`/`description`/`author`/`homepage`/`repository`/`keywords`/`skills`/`mcpServers`/`interface`）；未使用任何官方清单里不存在的字段。
+- **真实模型回合**（`codex exec --approve-for-me`，插件从已安装的 `~/.codex` 加载）：模型列出全部 10 个 `memory_*` 工具 → `memory_group` 返回 28 个组 → `memory_write` 写入「对话记忆」得到 `mem_1bdc5ad7-…` → `memory_recall` 读回 1 条；事后用 CLI 直查临时库确认同一条内容，真实库 size/mtime 未变、查不到该内容。
 
 未验证 / 未做：
 
-- **没有在你的真实 `~/.codex` 上安装**本插件，也没有改你的 Codex 配置或真实记忆库；需要你自己执行上面的命令。
-- 没有跑模型回合，所以"会话里真的弹出 `memory_*` 工具并响应 `$alaya-database`"未在真实会话中验证；验证到的是客户端解析 + 用该描述符真实启动服务。
+- 没有在 Codex **桌面会话（GUI）** 里复验"重启后工具出现"这一步；上面的真实回合走的是 `codex exec`（同一客户端、同一插件、同一 MCP 描述符）。桌面进程需要你自己重启后确认。
+- 没有跑 `$alaya-database` 技能触发路径（真实回合是直接调用工具；技能文本已安装且与仓库一致）。
 - 没有上架任何公共插件目录，也没有插件商店 UI。
 - 官方文档站点（`developers.openai.com/plugins/build/plugins`、`/codex/mcp`）在本机返回 HTTP 403，插件与 marketplace 格式以本机 codex-cli 的实测行为和官方插件清单为准；若你那边能打开官方文档，可再核对一次字段说明。
 
