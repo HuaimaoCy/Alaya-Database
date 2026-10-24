@@ -7,8 +7,8 @@ import { pathToFileURL } from 'node:url'
 import { createMemoryVault } from '../src/core/vault.js'
 
 /** Exercise the actual transport; can also run against a packaged executable. */
-export async function exerciseMcp(command, args, databasePath, environment = {}) {
-  const child = spawn(command, [...args, '--db', databasePath], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...environment } })
+export async function exerciseMcp(command, args, databasePath, environment = {}, { cwd } = {}) {
+  const child = spawn(command, [...args, '--db', databasePath], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd, env: { ...process.env, ...environment } })
   let id = 0, buffer = '', stderr = ''
   const pending = new Map()
   child.stderr.on('data', chunk => { stderr += chunk.toString() })
