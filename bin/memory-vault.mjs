@@ -26,7 +26,7 @@
 import { createServer } from 'node:http'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { IMAGE_MAX_BYTES } from '../src/images.js'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createMemoryVault } from '../src/core/vault.js'
@@ -53,7 +53,9 @@ function skillPath() {
  * @returns {string} The user's Codex skills directory.
  */
 function defaultSkillRoot() {
-  return join(homedir(), '.codex', 'skills')
+  const home = process.env.CODEX_HOME ?? join(homedir(), '.codex')
+  if (!home.trim()) throw new Error('CODEX_HOME 不能为空')
+  return resolve(home, 'skills')
 }
 
 /** Header every RPC caller must set — the same marker the DSH panel uses, so a cross-site form post cannot reach the vault either. */
@@ -162,6 +164,8 @@ export function usage() {
     '',
     '命令:',
     '  mcp [--session <id>]                              启动供 Codex 使用的 stdio MCP 接口',
+    '  codex setup|status [--home <目录>] [--db <路径>] [--dry-run] [--update-skill]  配置或检查 Codex MCP + 技能（不打开数据库）',
+    '  codex plugin                                      检查随包发布的 Codex 插件清单，并打印安装/卸载命令（不写配置、不打开数据库）',
     '  skill [print|path|install] [--dir <目录>]          管理 Codex 技能：print 输出内容，path 显示路径，install 装进 ~/.codex/skills（--dir 仅 install 使用）',
     '  state                                             记忆库总览：统计、记忆组、标签、限额',
     '  groups [--scope conversation|knowledge]           列出记忆组（树形）',
@@ -427,11 +431,24 @@ function commandToOp(command, parsed) {
       return { direct: 'serve' }
     case 'mcp':
       return { direct: 'mcp' }
+    case 'codex': {
+      const action = positionals[0] ?? 'status'
+      if (!['setup', 'status', 'plugin'].includes(action)) throw new Error('codex 子命令：setup / status / plugin')
+      if (positionals.length > 1) throw new Error('codex 不接受额外的位置参数')
+      for (const key of flags.keys()) {
+        if (!['home', 'db', 'dry-run', 'update-skill'].includes(key)) throw new Error(`codex 不支持 --${key}`)
+        if (['home', 'db'].includes(key) && option(flags, key) === undefined) throw new Error(`--${key} 需要值`)
+        if (['dry-run', 'update-skill'].includes(key) && flags.get(key).some(value => value !== true)) throw new Error(`--${key} 是开关，不接受值`)
+      }
+      if (action === 'plugin' && flags.size > 0) throw new Error('codex plugin 不接受选项；它只读取插件清单并打印安装命令')
+      return { direct: 'codex', action, home: option(flags, 'home'), databasePath: option(flags, 'db'), dryRun: flag(flags, 'dry-run'), updateSkill: flag(flags, 'update-skill') }
+    }
     case 'skill': {
       const action = positionals[0] ?? 'print'
       if (action !== 'print' && action !== 'path' && action !== 'install') {
         throw new Error(`未知的 skill 子命令「${action}」；可用：print / path / install`)
       }
+      if (flags.has('dir') && option(flags, 'dir') === undefined) throw new Error('--dir 需要值')
       return { direct: 'skill', skillAction: action, skillRoot: option(flags, 'dir') }
     }
     case 'help':
@@ -466,6 +483,14 @@ export async function runCli(argv, io = {}) {
     const plan = commandToOp(command, parsed)
     if ('direct' in plan && plan.direct === 'help') {
       stdout(`${usage()}\n`)
+      return 0
+    }
+    if ('direct' in plan && plan.direct === 'codex') {
+      const { inspectCodexSetup, setupCodex, inspectCodexPlugin } = await import('../src/codex.js')
+      const result = plan.action === 'status' ? inspectCodexSetup(plan)
+        : plan.action === 'plugin' ? inspectCodexPlugin(plan)
+        : setupCodex(plan)
+      stdout(`${JSON.stringify(result, null, 2)}\n`)
       return 0
     }
     // The skill ships inside this package and never touches the vault, so it

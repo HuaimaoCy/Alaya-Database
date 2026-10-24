@@ -130,6 +130,9 @@ try {
   const emptyDir = await cli(['skill', 'install', '--dir', ''])
   assert.equal(emptyDir.code, 1, 'an empty --dir must be refused, not installed into the working directory')
   assert.ok(emptyDir.err.includes('--dir 不能为空值'))
+  const missingDir = await cli(['skill', 'install', '--dir'])
+  assert.equal(missingDir.code, 1, 'a missing --dir value must not fall back to the real Codex home')
+  assert.ok(missingDir.err.includes('--dir 需要值'))
 
   assert.ok(!existsSync(untouchedDb), 'no skill subcommand may create a database')
 } finally {

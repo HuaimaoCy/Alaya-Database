@@ -34,6 +34,26 @@
 
 ## 安装
 
+Codex 推荐使用一键配置（MCP + 技能）：
+
+```bash
+npm install
+node bin/memory-vault.mjs codex setup --dry-run
+node bin/memory-vault.mjs codex setup
+```
+
+支持独立 `CODEX_HOME`、数据库路径、原配置备份与冲突保护。重启 Codex 后可输入 `$alaya-database 记住：…` 快捷添加。[完整接入说明](docs/codex.zh.md)。
+
+也提供本地 Codex 插件（MCP + 技能 + 本地 marketplace 入口），适用于支持 `codex plugin` 的客户端；不要与一键配置重复启用：
+
+```bash
+node bin/memory-vault.mjs codex plugin      # 检查清单，打印要执行的命令
+codex plugin marketplace add "<仓库绝对路径>"
+codex plugin add alaya-database@alaya
+```
+
+插件清单与实际 MCP 启动可用 `npm run test:plugin` 验证；真实客户端安装/卸载与解析出的启动配置用 `npm run test:codex-cli`（临时 `CODEX_HOME`，不碰本机配置与真实库）。
+
 三条数据入口，共用同一个数据库；第四项把使用规范装进 Codex：
 
 ```bash

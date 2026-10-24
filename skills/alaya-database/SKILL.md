@@ -15,6 +15,15 @@ MCP 与 DSH 插件的关键差异：**这里不会自动向系统提示注入任
 2. **过程中**：需要某个领域的既有约定（项目规则、用户偏好、踩过的坑）就 `memory_recall`；要用一整组知识就 `memory_apply` action=set groups=["组名"]，然后 `memory_context` 读正文。
 3. **任务结束或得出已确认结论时**：`memory_write` 写入（一次可多条），或 `memory_summarize` 带 content 固化一段总结。上下文快满时先固化，比事后回忆可靠。
 
+## 快捷添加
+
+用户可直接输入 `$alaya-database 记住：正文`，或「把这个结论存入 Alaya 的某某组」。这是通过 MCP + 技能工作的入口，不是 Codex 界面按钮。
+
+- 用户已经明确要求保存时，按其指定的正文、组与归属写入，不必再问是否保存；没有指定组时复用合适的已有项目组，否则使用知识库。不要自动把普通聊天全部存入库。
+- 用少量关键词检索潜在重复；已存在同一内容就返回原条目的 id，不重复写入。检索失败不等于没有重复。
+- 调用 `memory_write` 时传 `group`、`scope`、`sessionId`，正文放进 `entries: [{ title, content }]`。不同归属不混写，只有当前任务有效的进度用 conversation。
+- 只有收到工具成功响应才报告「已保存」，简短给出标题、组和返回的完整 id。不要把敏感凭据写入普通记忆。
+
 ## sessionId 约定
 
 每个工具调用都带 `sessionId` 参数：一个任务的稳定唯一标识（如 `alaya-2026-10-01-fix-login`）。同一任务全程用同一个；不同任务用不同的，否则知识选择和总结目标会串到一起。省略时使用本 MCP 进程的临时会话——只在单任务进程里可接受。
@@ -60,7 +69,7 @@ MCP 与 DSH 插件的关键差异：**这里不会自动向系统提示注入任
 
 ```bash
 node bin/memory-vault.mjs recall --query "发布 流程"
-node bin/memory-vault.mjs write --content "结论……" --group 知识库 --title "标题" --tags a,b
+node bin/memory-vault.mjs write --content "结论……" --group 知识库 --title "标题" --tags a,b --source codex
 node bin/memory-vault.mjs show <id>
 node bin/memory-vault.mjs help
 ```
@@ -68,4 +77,7 @@ node bin/memory-vault.mjs help
 ## 安装与配置（供参考）
 
 - 注册 MCP 服务器：`codex mcp add memory-vault -- node <仓库路径>/bin/memory-vault.mjs mcp`，或在 Codex `config.toml` 里写 `[mcp_servers.memory-vault]`，`command = "node"`，`args = ["<仓库路径>/bin/memory-vault.mjs", "mcp"]`。
-- 安装/更新本 skill：在仓库根目录运行 `node bin/memory-vault.mjs skill install`（复制到 `~/.codex/skills/alaya-database/`）。
+- 一键接入：在仓库根目录运行 `node bin/memory-vault.mjs codex setup --dry-run` 预览，再运行 `node bin/memory-vault.mjs codex setup`。同时配置 MCP 和本 skill，支持 `--home` 与 `--db`；不打开数据库，不启动后台 stdio 进程。已有不同 MCP 配置会拒绝覆盖，技能更新需显式 `--update-skill` 并自动备份。
+- 插件接入（支持 `codex plugin` 的客户端）：`node bin/memory-vault.mjs codex plugin` 查看清单状态与命令，再执行 `codex plugin marketplace add "<仓库绝对路径>"` 与 `codex plugin add alaya-database@alaya`。插件启动用相对路径（`cwd: "."` 落到安装副本），数据库默认与桌面/CLI 共用，可用 `MEMORY_VAULT_DB` 覆盖。与一键接入二选一。
+- 判断当前会话是否真的接上了：`memory_updates action=status` 返回版本，或 `memory_recall` 能读到既有条目。没有这些工具说明 MCP 未加载，先重启 Codex 或新建会话。
+- 仅安装本 skill：`node bin/memory-vault.mjs skill install`（复制到 `$CODEX_HOME/skills/alaya-database/`，未设置时使用 `~/.codex/skills/alaya-database/`）。安装后重启 Codex 或新建会话以重新发现工具与技能。

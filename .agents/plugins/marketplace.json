@@ -1,0 +1,20 @@
+{
+  "name": "alaya",
+  "interface": {
+    "displayName": "Alaya"
+  },
+  "plugins": [
+    {
+      "name": "alaya-database",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

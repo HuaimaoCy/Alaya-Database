@@ -1,0 +1,35 @@
+{
+  "name": "alaya-database",
+  "version": "0.7.15",
+  "description": "Local Alaya memory for Codex: recall project knowledge and save confirmed notes through a stdio MCP server.",
+  "author": {
+    "name": "HuaimaoCy"
+  },
+  "homepage": "https://github.com/HuaimaoCy/Alaya-Database",
+  "repository": "https://github.com/HuaimaoCy/Alaya-Database",
+  "keywords": [
+    "memory",
+    "knowledge base",
+    "mcp",
+    "sqlite",
+    "local-first"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Alaya Database",
+    "shortDescription": "Recall and save local Alaya memories",
+    "longDescription": "Alaya Database keeps memories in one local SQLite file. This plugin starts the bundled stdio MCP server so Codex can search existing memories, read a knowledge group's full text, and save a confirmed conclusion into a chosen group. Nothing leaves the machine; the same file is shared with the Alaya desktop app, the CLI and the DSH plugin.",
+    "developerName": "HuaimaoCy",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/HuaimaoCy/Alaya-Database",
+    "defaultPrompt": [
+      "查一下这个项目的既有约定",
+      "记住：这条结论存入「项目约定」组"
+    ]
+  }
+}

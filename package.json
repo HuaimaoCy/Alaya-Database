@@ -20,6 +20,9 @@
                   "client.js",
                   "bin",
                   "skills",
+                  ".codex-plugin",
+                  ".agents",
+                  ".mcp.json",
                   "src",
                   "docs",
                   "cordis.patch.yml",
@@ -49,7 +52,12 @@
                     "node":  "\u003e=22.5.0"
                 },
     "scripts":  {
-                    "test":  "node --no-warnings tests/smoke.mjs \u0026\u0026 node --no-warnings tests/core-smoke.mjs \u0026\u0026 node --no-warnings tests/serve-real.mjs \u0026\u0026 node --no-warnings tests/mcp-smoke.mjs \u0026\u0026 node --no-warnings tests/standalone-smoke.mjs \u0026\u0026 node --no-warnings tests/skill-smoke.mjs \u0026\u0026 node --no-warnings tests/updates-smoke.mjs \u0026\u0026 node --no-warnings tests/images-smoke.mjs",
-                    "mcp":  "node --no-warnings bin/memory-vault.mjs mcp"
-                }
+                    "test":  "node --no-warnings tests/smoke.mjs \u0026\u0026 node --no-warnings tests/core-smoke.mjs \u0026\u0026 node --no-warnings tests/serve-real.mjs \u0026\u0026 node --no-warnings tests/mcp-smoke.mjs \u0026\u0026 node --no-warnings tests/standalone-smoke.mjs \u0026\u0026 node --no-warnings tests/skill-smoke.mjs && node --no-warnings tests/codex-setup.mjs \u0026\u0026 node --no-warnings tests/updates-smoke.mjs \u0026\u0026 node --no-warnings tests/images-smoke.mjs",
+                    "mcp":  "node --no-warnings bin/memory-vault.mjs mcp",
+                    "test:plugin": "node --no-warnings tests/codex-plugin.mjs",
+                    "test:codex-cli": "node --no-warnings tests/codex-cli.mjs"
+                },
+    "dependencies": {
+        "smol-toml": "1.9.1"
+    }
 }
