@@ -1,63 +1,65 @@
 {
-    "name":  "alaya-database",
-    "version":  "0.7.15",
-    "description":  "Alaya Database - the standalone vault core (CLI, MCP, local RPC and DSH plugin). The notebook is an extension hosted by the Alaya desktop app, deliberately not part of this repository.",
-    "type":  "module",
-    "main":  "index.js",
-    "exports":  {
-                    ".":  "./index.js",
-                    "./client":  "./client.js",
-                    "./core":  "./src/core/vault.js",
-                    "./core/ops":  "./src/core/ops.js",
-                    "./mcp":  "./src/mcp.js",
-                    "./package.json":  "./package.json"
-                },
-    "bin":  {
-                "memory-vault":  "bin/memory-vault.mjs"
-            },
-    "files":  [
-                  "index.js",
-                  "client.js",
-                  "bin",
-                  "skills",
-                  ".codex-plugin",
-                  ".agents",
-                  ".mcp.json",
-                  "src",
-                  "docs",
-                  "cordis.patch.yml",
-                  "README.md"
-              ],
-    "dsh":  {
-                "bundle":  {
-                               "patch":  "./cordis.patch.yml"
-                           },
-                "client":  {
-                               "platform":  "web",
-                               "inject":  [
-                                              "@deepseek-ai/dsh-client-ui-layout",
-                                              "@deepseek-ai/dsh-client-ui-sidebar"
-                                          ]
-                           }
-            },
-    "peerDependencies":  {
-                             "@deepseek-ai/cordis":  "*"
-                         },
-    "peerDependenciesMeta":  {
-                                 "@deepseek-ai/cordis":  {
-                                                             "optional":  true
-                                                         }
-                             },
-    "engines":  {
-                    "node":  "\u003e=22.5.0"
-                },
-    "scripts":  {
-                    "test":  "node --no-warnings tests/smoke.mjs \u0026\u0026 node --no-warnings tests/core-smoke.mjs \u0026\u0026 node --no-warnings tests/serve-real.mjs \u0026\u0026 node --no-warnings tests/mcp-smoke.mjs \u0026\u0026 node --no-warnings tests/standalone-smoke.mjs \u0026\u0026 node --no-warnings tests/skill-smoke.mjs && node --no-warnings tests/codex-setup.mjs \u0026\u0026 node --no-warnings tests/updates-smoke.mjs \u0026\u0026 node --no-warnings tests/images-smoke.mjs",
-                    "mcp":  "node --no-warnings bin/memory-vault.mjs mcp",
-                    "test:plugin": "node --no-warnings tests/codex-plugin.mjs",
-                    "test:codex-cli": "node --no-warnings tests/codex-cli.mjs"
-                },
-    "dependencies": {
-        "smol-toml": "1.9.1"
+  "name": "alaya-database",
+  "version": "0.7.15",
+  "description": "Alaya Database - the standalone vault core (CLI, MCP, local RPC and DSH plugin). The notebook is an extension hosted by the Alaya desktop app, deliberately not part of this repository.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./core": "./src/core/vault.js",
+    "./core/ops": "./src/core/ops.js",
+    "./mcp": "./src/mcp.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "memory-vault": "bin/memory-vault.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "bin",
+    "skills",
+    ".codex-plugin",
+    ".agents",
+    ".mcp.json",
+    "src",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    ".zcode-plugin",
+    "marketplace.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
     }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --no-warnings tests/plugin-manifests.mjs && node --no-warnings tests/smoke.mjs && node --no-warnings tests/core-smoke.mjs && node --no-warnings tests/serve-real.mjs && node --no-warnings tests/mcp-smoke.mjs && node --no-warnings tests/standalone-smoke.mjs && node --no-warnings tests/skill-smoke.mjs && node --no-warnings tests/codex-setup.mjs && node --no-warnings tests/updates-smoke.mjs && node --no-warnings tests/images-smoke.mjs",
+    "mcp": "node --no-warnings bin/memory-vault.mjs mcp",
+    "test:plugin": "node --no-warnings tests/codex-plugin.mjs",
+    "test:codex-cli": "node --no-warnings tests/codex-cli.mjs"
+  },
+  "dependencies": {
+    "smol-toml": "1.9.1"
+  }
 }

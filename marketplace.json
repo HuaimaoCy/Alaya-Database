@@ -1,0 +1,19 @@
+{
+  "name": "alaya",
+  "description": "Alaya 本机记忆库的 ZCode 插件市场：一个插件同时提供 alaya-database 技能与 stdio MCP 服务。",
+  "plugins": [
+    {
+      "name": "alaya-database",
+      "source": "./",
+      "version": "0.7.15",
+      "description": "检索与写入本机 Alaya 记忆库（MCP + 技能）。",
+      "category": "productivity",
+      "tags": [
+        "memory",
+        "mcp",
+        "sqlite",
+        "local-first"
+      ]
+    }
+  ]
+}

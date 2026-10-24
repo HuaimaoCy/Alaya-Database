@@ -149,3 +149,16 @@ codex exec --approve-for-me "用 memory_write 写一条测试记忆，再用 mem
 备份包含原配置的完整内容，可能含其他 MCP 的密钥。请将 Codex 目录和备份保留在私人目录，确认安装正常且不再需要恢复后自行删除备份。Unix 新文件权限为 `0600`；Windows 权限继承目录 ACL，安装器不会改动 ACL。配置必须为 UTF-8（支持 BOM），其他编码会拒绝修改。
 
 本实现是本地 MCP ＋ 技能接入，不代表已上架公共目录。
+## ZCode
+
+ZCode 与 Codex 共用同一份技能与 MCP 清单，仓库根目录同时是插件市场：
+
+```text
+marketplace.json          # 市场清单（name: alaya，source: "./"）
+.zcode-plugin/plugin.json # ZCode 插件清单（skills + mcpServers）
+.codex-plugin/plugin.json # Codex 插件清单
+.mcp.json                 # memory-vault MCP 服务
+skills/alaya-database/    # 技能
+```
+
+接入步骤：**设置 → 插件 → Create → 添加市场 → 本地目录**（指向本仓库，或 GitHub `HuaimaoCy/Alaya-Database`），然后在 Personal 分组安装 `alaya-database`。技能出现在 **设置 → 技能 → Plugin skills**，MCP 出现在 **设置 → MCP → Plugin MCP servers**。发布新版本时同步改 `marketplace.json` 的 `version`，否则更新检查不会提示。

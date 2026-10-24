@@ -1,0 +1,21 @@
+{
+  "name": "alaya-database",
+  "version": "0.7.15",
+  "description": "在 ZCode 里读写本机 Alaya 记忆库：检索既有约定、读取记忆组全文、把确认的结论写回指定分组。数据只在本机 SQLite 文件里。",
+  "author": {
+    "name": "HuaimaoCy"
+  },
+  "homepage": "https://github.com/HuaimaoCy/Alaya-Database",
+  "repository": "https://github.com/HuaimaoCy/Alaya-Database",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "knowledge-base",
+    "mcp",
+    "sqlite",
+    "local-first",
+    "alaya"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
