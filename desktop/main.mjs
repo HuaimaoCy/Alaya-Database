@@ -10,12 +10,15 @@ import { createModelAdapter, validateModelSettings } from '../src/model.js'
 import { validateVaultFile } from './lib/databases.mjs'
 import { createDesktopUpdater } from './lib/updates.mjs'
 import { MistakebookStore } from '../addons/mistakebook/store.mjs'
+import { NOTEBOOK_DISPLAY_VERSION, NOTEBOOK_RELEASE_NAME } from '../src/version.js'
+import {PRODUCTS} from './products.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
+const product=PRODUCTS[JSON.parse(readFileSync(join(here,'product.json'),'utf8')).kind]??PRODUCTS.unified
 const argv = process.argv.slice(1)
 const option = name => { const i = argv.indexOf(name); return i < 0 ? undefined : argv[i + 1] }
 const selftest = argv.includes('--selftest')
-app.setPath('userData', join(app.getPath('appData'), 'Memory Vault Mistakebook'))
+app.setPath('userData', join(app.getPath('appData'),product.userData))
 if (option('--user-data')) app.setPath('userData', resolve(option('--user-data')))
 let bridge, window, updater, updateTimer, mistakebook, ocrRequest, aiRequest, preferences = {}, prefsPath
 const simulations = new Set()
@@ -32,14 +35,22 @@ function savePreferences(next) {
 const modelKey = () => preferences.encryptedKey ? safeStorage.decryptString(Buffer.from(preferences.encryptedKey, 'base64')) : ''
 const adapter = () => createModelAdapter(() => preferences.model ?? {}, modelKey)
 function checkDataTarget(path) {
+  if (typeof path !== 'string' || path.trim() === '') throw new Error('导出路径无效，请重新选择')
   const target = resolve(path).toLowerCase()
-  const protectedFiles = [bridge.databasePath, mistakebook.path, prefsPath].flatMap(file => [file, `${file}-wal`, `${file}-shm`]).map(file => resolve(file).toLowerCase())
+  // 与记忆库共用同一个 SQLite 文件时 mistakebook.path 是 null（笔记本没有独立文件）。
+  // 必须先滤掉空值再 resolve：否则 path.resolve(null) 抛 ERR_INVALID_ARG_TYPE，
+  // 会把笔记本导出与备份整体变成 {ok:false}，用户只看到一句无意义的失败。
+  const protectedFiles = [bridge.databasePath, mistakebook?.path, prefsPath]
+    .filter(file => typeof file === 'string' && file.trim() !== '')
+    .flatMap(file => [file, `${file}-wal`, `${file}-shm`])
+    .map(file => resolve(file).toLowerCase())
   if (protectedFiles.includes(target) || existsSync(`${path}-wal`) || existsSync(`${path}-shm`)) throw new Error('请选择独立于正在使用的数据文件的导出或备份路径')
 }
 async function desktopInfo() {
   return {
-    ...await bridge.info(), version: app.getVersion(), model: preferences.model ?? {}, hasKey: Boolean(preferences.encryptedKey), updates: updater.status(),
+    ...await bridge.info(), version: app.getVersion(), displayVersion:NOTEBOOK_DISPLAY_VERSION, releaseName:NOTEBOOK_RELEASE_NAME,product:{kind:product.kind,name:product.name}, model: preferences.model ?? {}, hasKey: Boolean(preferences.encryptedKey), updates: updater.status(),
     connectors: connectorConfig({
+      kind:product.kind,pluginPath:app.isPackaged?join(process.resourcesPath,'dsh-plugin','index.js'):resolve(here,'..',product.kind==='notebook'?'notebook-plugin.js':'index.js'),
       command: process.execPath,
       args: [app.isPackaged ? join(process.resourcesPath, 'app.asar', 'bin', 'memory-vault.mjs') : resolve(here, '..', 'bin', 'memory-vault.mjs'), 'mcp'],
       databasePath: bridge.databasePath,
@@ -88,6 +99,19 @@ const notebookHooks = {
 }
 function registerDesktop() {
   register('mistakebook:invoke', (action, body = {}) => bridge.invoke(`notebook.${action}`, body))
+  // 自由画布：画布文档是笔记本域的数据（notebook_meta 的 canvas 键），与笔记同库
+  // 但不进入数据库（记忆）域；读写都经过同一个 MistakebookStore 的校验与限流。
+  register('notebook:canvas', (action, body = {}) => {
+    if(!mistakebook)throw new Error('此 Database 发行版未启用 Notebook')
+    if (action === 'load') {
+      const state = mistakebook.canvasState()
+      // 保留顶层文档字段：仍按「load 直接返回文档」解析的旧渲染层不会把
+      // { docs, corrupted } 误当成空文档而覆盖原画布；新渲染层读 docs。
+      return { ...state.docs, docs: state.docs, corrupted: state.corrupted }
+    }
+    if (action === 'save') return mistakebook.setCanvasDocs(body?.docs ?? body)
+    throw new Error('未知的画布操作')
+  })
   register('vault:updates', async (action, body) => {
     switch (action) {
       case 'status': return updater.status()
@@ -172,7 +196,7 @@ async function openWindow() {
     const actualMessage = event.message ?? message
     if (actualLevel === 'error' || actualLevel >= 3) errors.push(String(actualMessage))
   })
-  await window.loadFile(join(here, 'renderer', 'index.html'))
+  await window.loadFile(join(here,'renderer',product.entry))
   if (selftest) {
     try {
       if (option('--test-module')) {
@@ -219,6 +243,7 @@ app.whenReady().then(async () => {
       // --mistake-db 仍强制走独立文件模式（测试与调试出口）。
       const legacyNotebookPath = option('--mistake-db') ?? join(app.getPath('userData'), 'mistakebook.sqlite')
       bridge = openVault({ databasePath: option('--db') ?? process.env.MEMORY_VAULT_DB ?? preferences.databasePath, updates: updater, ...adapter(), logger: { info: diagnostic, warn: diagnostic } })
+      if(product.kind!=='database'){
       if (option('--mistake-db')) {
         mistakebook = new MistakebookStore(option('--mistake-db'))
       } else {
@@ -226,6 +251,7 @@ app.whenReady().then(async () => {
         try { const migrated = mistakebook.migrateFromFile(legacyNotebookPath); if (migrated?.migrated) diagnostic(`notebook data migrated from ${legacyNotebookPath}`) } catch (error) { diagnostic(`notebook migration failed, falling back to file mode: ${error.message}`); mistakebook.close(); mistakebook = new MistakebookStore(legacyNotebookPath) }
       }
       bridge.attach({ notebook: mistakebook, notebookHooks })
+      }
       registerDesktop(); await openWindow()
       if (app.isPackaged && !selftest) {
         const check = () => { if (updater.status().settings.autoCheck) void updater.check().catch(error => diagnostic(error.message)) }

@@ -1,0 +1,939 @@
+/* ============================================================================
+ * Liquid Glass 材质层
+ *
+ * 这一层只做视觉：不改任何几何（宽高、内边距、行高、可点击区域），也不新增
+ * 需要别人改 HTML 才能命中的类。所有表面由 glass.js 打 data-glass-surface，
+ * 分级写在 <html data-glass-tier>，实时变量由引擎写（见 docs/liquid-glass.zh.md）。
+ *
+ * 三个刻意的取舍：
+ * 1) 不用 ::before / ::after 画高光。.side / .bar / .status 都是 flex 容器，
+ *    伪元素会变成额外的 flex 项，直接改布局；改用多层 background 与 inset 阴影。
+ * 2) 不给 .side / .bar 加 position:relative。侧栏里有绝对定位的浮层菜单
+ *    （.mb-side-bottom .ws-panel），加定位上下文会把它们的锚点挪走。
+ * 3) flat 档不是「少一点玻璃」，而是实心回退：没有 backdrop-filter，靠 tint 与
+ *    hairline 保持层级，保证高对比 / 关闭透明度时仍然可读可点。
+ * ========================================================================== */
+
+:root {
+  /* 模糊与着色 */
+  --glass-blur: 20px;
+  --glass-saturate: 175%;
+  --glass-brightness: 1.02;
+  --glass-tint: rgb(255 255 255 / .60);
+  --glass-tint-strong: rgb(255 255 255 / .80);
+  --glass-tint-soft: rgb(255 255 255 / .46);
+  --glass-tint-solid: rgb(252 253 255 / .97);
+
+  /* 边缘：玻璃的辨识度在这里，不在中间那团模糊 */
+  --glass-hairline: rgb(255 255 255 / .62);
+  --glass-edge-line: rgb(20 26 38 / .07);
+  --glass-bevel-top: rgb(255 255 255 / .88);
+  --glass-bevel-bottom: rgb(20 26 38 / .05);
+  --glass-rim: rgb(255 255 255 / .70);
+  --glass-rim-strong: rgb(255 255 255 / .92);
+  /* full 档的色散：冷暖各一条 1px，肉眼几乎只感到「边缘不脏」 */
+  --glass-fringe-warm: rgb(255 226 232 / .55);
+  --glass-fringe-cool: rgb(214 238 255 / .55);
+
+  /* 深度：全站三档影子，见「主题」一节 */
+  --glass-shadow: var(--glass-elev-1);
+  --glass-shadow-float: var(--glass-elev-3);
+
+  /* 圆角：参照 Apple Landmarks 的浮动面板，四角是能看见的大圆角。
+     面板与窗口边缘之间留 --glass-gutter，圆角才有东西衬着。 */
+  --glass-gutter: 10px;
+  --glass-radius-chrome: 26px;
+  --glass-radius-panel: 24px;
+  --glass-radius-float: 22px;
+  --glass-radius-control: 12px;
+  --glass-radius-hud: 14px;
+
+  /* 指针光源上限：指针位置只改梯度位置，不改亮度总量 */
+  --glass-glare: .55;
+  --glass-duration: 180ms;
+  --glass-spring: var(--spring, cubic-bezier(.22,1,.32,1));
+}
+
+/* ---------- 分级 ---------------------------------------------------------- */
+
+/* 分级：写在 <html> 上（运行时），也可以写在任意祖先上——lab 页就是靠这一点
+   在一页里并排展示三档，而不需要复制样式。 */
+[data-glass-tier="full"] {
+  --glass-blur: 26px;
+  --glass-saturate: 185%;
+  --glass-tint: rgb(255 255 255 / .56);
+  --glass-rim: var(--glass-rim-strong);
+}
+
+[data-glass-tier="flat"] {
+  --glass-blur: 0px;
+  --glass-saturate: 100%;
+  --glass-brightness: 1;
+  --glass-tint: var(--glass-tint-solid);
+  --glass-tint-strong: rgb(255 255 255 / .99);
+  --glass-tint-soft: rgb(250 251 254 / .96);
+  --glass-hairline: rgb(20 26 38 / .10);
+  --glass-bevel-top: transparent;
+  --glass-bevel-bottom: transparent;
+  --glass-shadow: var(--glass-elev-1);
+  --glass-shadow-float: var(--glass-elev-2);
+  --glass-glare: 0;
+}
+
+/* 备用暗色令牌：当前界面只有亮色，这套值留着给日后的深色主题接。只覆盖亮度类
+   令牌，模糊与饱和度仍由档位决定（见上），否则两处都会改同一件事。 */
+[data-glass-theme="dark"] {
+  --glass-tint: rgb(28 32 40 / .58);
+  --glass-tint-strong: rgb(24 28 36 / .80);
+  --glass-tint-soft: rgb(24 28 36 / .46);
+  --glass-tint-solid: rgb(26 30 38 / .97);
+  --glass-hairline: rgb(255 255 255 / .14);
+  --glass-edge-line: rgb(255 255 255 / .12);
+  --glass-bevel-top: rgb(255 255 255 / .18);
+  --glass-bevel-bottom: rgb(0 0 0 / .30);
+  --glass-shadow: 0 1px 2px rgb(0 0 0 / .35), 0 6px 16px -12px rgb(0 0 0 / .60);
+  --glass-shadow-float: 0 1px 2px rgb(0 0 0 / .40), 0 24px 60px -32px rgb(0 0 0 / .68);
+  --glass-glare: .18;
+}
+
+/* ---------- 主题：纯黑文字、背景分级、统一层高 ---------------------------- */
+
+/* 背景预设：默认底色比卡片深一档，让「页面底」与「卡片/控件层」一眼分开。
+   换色只改 data-bg，不需要碰任何组件。 */
+html[data-bg="mist"] { --bg: #eef1f5; }
+html[data-bg="sand"] { --bg: #efe9df; }
+html[data-bg="ink"] { --bg: #dce2ec; }
+
+/* 纯黑正文（取值口径：全部黑色、满不透明度）。只列会显示文字的选择器；
+   主按钮的白字、错误提示的红、危险操作色不在其中——那是信息，不是配色。 */
+body, .cap, .label, .eyebrow, .kind-label, .base-mark, .tile-title, .tile-body,
+.tile-footer, .sec-head, .sub-head, .empty h2, .empty p, .drawer-head h2,
+.library-name, .library-caption, .brand-caption, .foot, .status, .breadcrumb,
+.nav, .nav .count, .sort-control, .sort-control select, .search, .page-heading p,
+.view-total span, .palette-item, .palette-hint, .palette-empty,
+.ws-label, .ws-cap, .ws-value, .ws-section-title, .ws-segment, .ws-preset,
+.curation-popover p, .filter-scope, .tag, .mb-caption { color: #000; }
+
+.search::placeholder { color: #000; opacity: 1; }
+
+/* 笔记本界面的灰字也是同一批口径：整壳继承黑色，再点掉几处写死的灰。
+   主按钮的白字、错题状态色（.mb-state.*）不在其中。 */
+.mb-shell { color: #000; }
+.mb-shell .mb-side-group summary,
+.mb-shell .mb-side-group summary:hover,
+.mb-shell .mb-side-label,
+.mb-shell .mb-side-config-name,
+.mb-shell .mb-local,
+.mb-shell .mb-page-heading p,
+.mb-shell .mb-page-heading .eyebrow,
+.mb-shell .mb-type-label,
+.mb-shell .mb-card-stem,
+.mb-shell .mb-card-foot,
+.mb-shell .mb-word-phonetic,
+.mb-shell .mb-word-sense,
+.mb-shell .mb-total span,
+.mb-shell .mb-side-empty,
+.mb-shell .mb-search-filter-label,
+.mb-shell .mb-detail .eyebrow { color: #000; }
+
+/* 统一层高：全站只有三档影子。任何面都从这三档里取，避免同一层出现两套阴影
+   （之前顶栏胶囊一套、浮层一套、侧栏又来一套，视觉上就是「层级堆叠重复」）。 */
+:root {
+  --glass-elev-1: 0 1px 2px rgb(20 26 38 / .06), 0 6px 16px -12px rgb(20 26 38 / .30);
+  --glass-elev-2: 0 1px 2px rgb(20 26 38 / .07), 0 12px 30px -20px rgb(20 26 38 / .38);
+  --glass-elev-3: 0 1px 3px rgb(20 26 38 / .08), 0 24px 60px -32px rgb(20 26 38 / .45);
+  /* 顶端一行共用的一条顶线与高度带 */
+  --row-top: 10px;
+  --row-height: 44px;
+  --row-gap: 12px;
+}
+
+/* ---------- 圆角、浮起与内缩 ---------------------------------------------- */
+
+/* 形状口径（参照 Apple Landmarks 的浮动面板）：
+   - 玻璃面是**浮起的面板**：与窗口边缘留出一圈空隙（--glass-gutter），四角大圆角；
+   - 圆角要被看见，就必须有东西衬在拐角外——顶栏背后是滚动内容，侧栏背后是页面底色；
+   - 面板本身由各 surface 的 ::after 绘制（绝对定位、z-index:-1），元素的盒子保持原位，
+     所以侧边栏仍然从 x=0 开始、顶栏仍然 73px 高，工作区布局的几何断言一条都不动。 */
+[data-glass-surface="control"],
+.segmented,
+.palette-item,
+.ws-segment,
+.ws-preset,
+.search-wrap {
+  border-radius: var(--glass-radius-control);
+}
+
+.search-wrap[data-glass-surface] { border-radius: var(--glass-radius-control); }
+
+/* 单行控件：内容居中并与四边等距。 */
+.btn[data-glass-surface],
+.icon-button[data-glass-surface],
+.segment[data-glass-surface],
+[data-glass-surface="hud"],
+[data-glass-surface="control"] {
+  align-items: center;
+  justify-content: center;
+}
+
+/* 侧栏导航是多列结构（图标 + 名称 + 计数），居中会破坏扫描路径：
+   只要求与边框等距，不强制居中。 */
+.nav[data-glass-surface] {
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* 浮层里的内容块：上下左右的留白一致，避免「贴着上边框」的观感。 */
+[data-glass-surface="float"] > :first-child { margin-top: 0; }
+[data-glass-surface="float"] > :last-child { margin-bottom: 0; }
+
+/* ---------- 表面基元 ------------------------------------------------------ */
+
+/* 玻璃本体：tint + 背景模糊 + 指针光源（同一张 background 里的多层渐变）。
+   没有 ::before，所以 flex 容器的子项数量不变。 */
+[data-glass-surface] {
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 62%
+    ),
+    linear-gradient(180deg, var(--glass-tint) 0%, var(--glass-tint) 100%);
+  /* 刻意不写 background-color: 底色是底子里的既有颜色（.btn.primary 的 accent、
+     .side 的 #eef0f4），把它清成 transparent 会让主操作按钮失去品牌色。
+     上面的渐变层盖在它之上，flat 档则由不透明 tint 完全接管。 */
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    var(--glass-shadow);
+  transition: background-color var(--glass-duration) var(--glass-spring),
+    box-shadow var(--glass-duration) var(--glass-spring),
+    border-color var(--glass-duration) var(--glass-spring);
+  /* 模糊写在基元上；flat 档在文件末尾用更高特异性关掉它（见「回退」一节）。 */
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+}
+
+/* 控件面积小、数量多：模糊半径单独降下来，别让一排按钮各开一台背景采样 */
+[data-glass-surface="control"] { --glass-blur: 8px; }
+[data-glass-surface="hud"] { --glass-blur: 14px; }
+
+/* 大面（框架 / 侧板）：贴边的面只在一侧有描边，别把它画成一张浮卡 */
+[data-glass-surface="chrome"],
+[data-glass-surface="panel"] {
+  border-color: var(--glass-edge-line);
+}
+
+/* 浮层：更强着色 + 更深的投影，层级靠不透明度差而不是靠更高的模糊。
+   额外一层「方向光」：角度来自 --glass-rim-angle（指针相对面中心的方向），
+   这样指针位置不只改亮度中心，还会让整块面有一道斜向的高光。 */
+[data-glass-surface="float"] {
+  background-image:
+    linear-gradient(
+      var(--glass-rim-angle, 180deg),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * .38)) 0%,
+      transparent 58%
+    ),
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 55%
+    ),
+    linear-gradient(180deg, var(--glass-tint-strong) 0%, var(--glass-tint) 100%);
+  border: 1px solid var(--glass-hairline);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    var(--glass-shadow-float);
+}
+
+/* 状态提示：最轻的胶囊，只抬一层 */
+[data-glass-surface="hud"] {
+  background-image: linear-gradient(180deg, var(--glass-tint-strong) 0%, var(--glass-tint-soft) 100%);
+  border-radius: var(--glass-radius-hud);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    var(--glass-shadow);
+}
+
+/* 控件：不投外部投影，厚度靠内斜面与描边表达 */
+[data-glass-surface="control"] {
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    inset 0 0 0 1px var(--glass-edge-line);
+}
+
+/* full 档的边缘色散规则放在文件末尾（见「回退」一节之后）：它要和具体的
+   .side / .bar / .bar[data-glass-surface] 规则抢同一批属性，靠后写者胜。 */
+
+/* ---------- 布局层：内容从 chrome 底下穿过去 ------------------------------- */
+
+/* 玻璃只在「背后真的有东西在动」时才成立，所以顶栏与侧栏都浮在内容之上：
+   - .bar 留在流里（几何不变），只抬 z-index 让它盖在内容上；
+   - .body 上提一个 bar 的高度，滚动视口因此从 y=0 开始；
+   - .workspace 的子项向左加宽 side-total，滚动视口同时盖住侧栏所在的列；
+   - .main / .foot 用内边距把内容推回原位，所以**未滚动时的第一屏位置不变**；
+   - .side 仍在流里（宽度、left、分隔条坐标系都不动），只把 z-index 抬到顶栏之上。
+   这样卡片滚动时会从侧栏面板底下经过，侧栏的圆角外侧才有内容衬着。 */
+:root {
+  --glass-bar-h: 73px;
+  --glass-mb-bar-h: 76px;
+  --glass-side-w: 222px;
+  --glass-splitter-w: 6px;
+}
+
+.app-shell { --glass-side-total: calc(var(--alaya-side-w, var(--glass-side-w)) + var(--glass-splitter-w)); }
+
+.app-shell .workspace > .bar,
+.app-shell .workspace > .body,
+.app-shell .workspace > .foot {
+  width: calc(100% + var(--glass-side-total));
+  margin-left: calc(-1 * var(--glass-side-total));
+}
+
+.app-shell .body { margin-top: calc(-1 * var(--glass-bar-h)); }
+.app-shell .body > .main { padding-top: calc(var(--glass-bar-h) + 22px); }
+/* 选中记忆时 .main 的内边距是 29（styles.css 的 .body.with-inspector），
+   密度 compact 时是 18：补回同样的差值，编辑态的第一屏也不位移。 */
+.app-shell .body.with-inspector > .main { padding-top: calc(var(--glass-bar-h) + 29px); }
+.app-shell[data-density="compact"] .body > .main,
+.app-shell[data-density="compact"] .body.with-inspector > .main { padding-top: calc(var(--glass-bar-h) + 18px); }
+
+/* 左右内边距 = 侧栏占位 + 原来的页面内边距。原公式用到 100%，而视口现在被加宽了
+   （.workspace 的子项向左多占了侧栏那一列），所以这里按「扣掉侧栏占位后的可用宽度」
+   重算：内容列的位置与宽度都与加宽前一致，否则右侧会多出一大块空白。 */
+.app-shell .workspace .main {
+  --glass-page-max: 1040px;
+  --glass-page-min: 26px;
+  padding-left: calc(var(--glass-side-total) + max(var(--glass-page-min), (100% - var(--glass-side-total) - var(--glass-page-max)) / 2));
+  padding-right: max(var(--glass-page-min), (100% - var(--glass-side-total) - var(--glass-page-max)) / 2);
+}
+.app-shell[data-page-width="comfortable"] .main { --glass-page-min: 31px; }
+.app-shell[data-page-width="wide"] .main { --glass-page-max: 1320px; --glass-page-min: 31px; }
+.app-shell[data-page-width="full"] .main {
+  padding-left: calc(var(--glass-side-total) + 31px);
+  padding-right: 31px;
+}
+.app-shell .workspace .foot { padding-left: calc(var(--glass-side-total) + 26px); }
+
+/* 侧栏浮在内容之上：几何不动（宽度、left 仍由 flex 与 --alaya-side-w 决定），只抬层级。
+   注意**不要**再给 .side 加 margin-top：面板本身已经 inset 了 --glass-gutter，
+   再加一次外距，面板顶就落在 20px，而右侧胶囊顶在 10px——这就是左右两条顶线对不上。
+   这里让元素从 0 起，面板顶正好等于 --glass-gutter，与胶囊同一条线。 */
+.app-shell > .side {
+  z-index: 7;
+  /* 品牌行（41×43）的中线对齐 --row-height 那条带的中线 */
+  padding-top: calc(var(--row-top) + (var(--row-height) - 43px) / 2);
+}
+.app-shell > #side-splitter { z-index: 6; }
+.app-shell > #side-splitter { margin-top: var(--glass-gutter); margin-bottom: var(--glass-gutter); }
+.bar[data-glass-surface] { position: relative; z-index: 6; }
+
+.mb-shell .mb-body { margin-top: calc(-1 * var(--glass-mb-bar-h)); }
+.mb-shell .mb-main { padding-top: calc(var(--glass-mb-bar-h) + 24px); }
+.mb-shell[data-mb-density="compact"] .mb-main { padding-top: calc(var(--glass-mb-bar-h) + 22px); }
+.mb-bar[data-glass-surface] { position: relative; z-index: 6; }
+
+/* ---------- 顶端：侧栏 · 圆形搜索 · 右侧胶囊 --------------------------------- */
+
+/* 顺序由 index.html 决定：.bar-left 只放圆形搜索；.toolbar-actions 是右侧胶囊，
+   内含视图名（面包屑）、布局、刷新、捕获，最右是「新建」。顶栏自己不再整条铺玻璃，
+   只让这两块浮在内容上——这样顶栏空白处的卡片仍然通透可见。 */
+/* 顶端一行：三块（侧栏面板、搜索圆、胶囊）共用**同一条顶线**与 44px 高度带。
+   之前侧栏面板顶 10、胶囊顶 15、搜索圆顶 20——三条顶线各说各话，这就是「没对齐」。
+   现在：面板与胶囊都从 --row-top 起，搜索圆在 44px 带里垂直居中。 */
+.bar[data-glass-surface] {
+  align-items: flex-start;
+  padding-top: var(--row-top);
+  padding-right: var(--row-gap);
+  padding-left: calc(var(--glass-side-total) + var(--row-gap));
+}
+
+/* 顶栏本体透明：面板交给搜索圆与右侧胶囊，避免一条横贯窗口的白带。 */
+.bar[data-glass-surface]::after { display: none; }
+
+.bar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--row-gap);
+  min-width: 0;
+}
+
+/* 右侧胶囊：一条圆角的玻璃工具条，高度与搜索圆共用同一条带。 */
+.bar .toolbar-actions[data-glass-surface] {
+  height: var(--row-height);
+  padding: 5px 6px 5px 14px;
+  gap: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-hairline);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    var(--glass-elev-2);
+}
+
+.bar .toolbar-actions .breadcrumb {
+  /* 视图名退成胶囊里的一枚标签；折叠/专注模式下「展开侧栏」按钮也挂在这里 */
+  margin-right: 6px;
+  min-width: 0;
+}
+
+.bar .toolbar-actions #new {
+  min-height: 32px;
+  padding: 5px 13px;
+  margin-left: 4px;
+  font-weight: 600;
+}
+
+/* 搜索：常态是一枚圆形按钮，聚焦后向左展开成输入框。
+   没有任何 JS：label 的点击会把焦点交给内部的 input，:focus-within 负责展开。 */
+.search-wrap[data-glass-surface] {
+  width: 34px;
+  height: 34px;
+  /* 与胶囊同一条 44px 高度带：圆心和胶囊中线重合 */
+  margin-top: calc((var(--row-height) - 34px) / 2);
+  padding: 0;
+  justify-content: center;
+  border-radius: 50%;
+  border-color: var(--glass-hairline);
+  box-shadow: inset 0 1px 0 var(--glass-bevel-top), var(--glass-elev-1);
+  cursor: text;
+  transition: width 220ms var(--glass-spring), border-radius 220ms var(--glass-spring), padding 220ms var(--glass-spring);
+}
+
+.search-wrap[data-glass-surface] .search { width: 0; opacity: 0; transition: opacity 140ms linear; }
+.search-wrap[data-glass-surface] kbd { display: none; }
+
+.search-wrap[data-glass-surface]:hover {
+  border-color: rgb(0 122 255 / .28);
+}
+
+.search-wrap[data-glass-surface]:focus-within {
+  width: min(260px, 34vw);
+  padding: 0 12px 0 8px;
+  justify-content: flex-start;
+  border-radius: var(--glass-radius-control);
+}
+
+.search-wrap[data-glass-surface]:focus-within .search { width: 100%; opacity: 1; }
+
+/* 笔记本顶栏走同一套：透明行 + 左侧圆形搜索 + 右侧胶囊。
+   笔记本的 .mb-bar 本来就从侧栏右侧开始（不像数据库那边的 .workspace 被拉宽），
+   所以这里只留 --row-gap，别再叠侧栏占位。 */
+.mb-bar[data-glass-surface] {
+  align-items: flex-start;
+  padding-top: var(--row-top);
+  padding-right: var(--row-gap);
+  padding-left: var(--row-gap);
+}
+
+.mb-bar[data-glass-surface]::after { display: none; }
+
+.mb-bar .toolbar-actions[data-glass-surface] {
+  height: var(--row-height);
+  padding: 5px 6px 5px 14px;
+  gap: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-hairline);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    var(--glass-elev-2);
+}
+
+.mb-bar .toolbar-actions .breadcrumb { margin-right: 6px; min-width: 0; }
+.mb-bar .toolbar-actions #mb-new { min-height: 32px; padding: 5px 13px; margin-left: 4px; font-weight: 600; }
+
+/* 笔记本侧栏同样贴顶：品牌行中线对齐顶端那条带 */
+.mb-shell > .mb-side {
+  padding-top: calc(var(--row-top) + (var(--row-height) - 44px) / 2);
+}
+
+/* ---------- 框架面：浮起的侧栏与顶栏 -------------------------------------- */
+
+/* 面板画在 ::after 上，元素盒子原位不动：
+   - .side 的 rect 仍是 [0, 222]（工作区测试断言 left === 0、width === 222）；
+   - .bar 仍是 73px 高，首屏内容偏移不变；
+   - ::after 绝对定位、z-index:-1，在 isolation:isolate 的堆叠上下文里落在「元素背景之上、
+     内容之下」，所以文字与控件仍然压在玻璃上，而面板可以自由内缩 + 圆角。
+   侧栏右侧没有内容经过，它的玻璃只采样页面底色；顶栏背后是滚动内容，拐角外能透出卡片。 */
+.side[data-glass-surface],
+.bar[data-glass-surface],
+.mb-side[data-glass-surface],
+.mb-bar[data-glass-surface],
+.drawer[data-glass-surface],
+.mb-detail[data-glass-surface],
+.mb-ai-side[data-glass-surface] {
+  isolation: isolate;
+  /* ::after 的定位上下文必须是它自己：否则绝对定位会一路找到视口，
+     面板就变成铺满窗口的一层雾（这个 bug 一张截图就能看出来）。 */
+  position: relative;
+  background-image: none;
+  background-color: transparent;
+  border: 0;
+  box-shadow: none;
+  /* 模糊只留在面板 ::after 上，元素本身不再采样一次（否则同一块背景被模糊两遍）。 */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.side[data-glass-surface]::after,
+.bar[data-glass-surface]::after,
+.mb-side[data-glass-surface]::after,
+.mb-bar[data-glass-surface]::after,
+.drawer[data-glass-surface]::after,
+.mb-detail[data-glass-surface]::after,
+.mb-ai-side[data-glass-surface]::after {
+  content: '';
+  position: absolute;
+  inset: var(--glass-gutter);
+  z-index: -1;
+  border-radius: var(--glass-radius-chrome);
+  border: 1px solid var(--glass-hairline);
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 62%
+    ),
+    linear-gradient(180deg, var(--glass-tint) 0%, var(--glass-tint) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    0 1px 2px rgb(20 26 38 / .05),
+    0 14px 34px -22px rgb(20 26 38 / .45);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  pointer-events: none;
+}
+
+/* 侧栏、抽屉、笔记本侧栏背后是页面底色，不是内容：给它们上模糊看不出任何区别，
+   却要按面积付合成成本（实测滚动帧率从 60 掉到 30）。这些面改成「磨砂面板」——
+   tint + 斜面 + hairline + 投影，不做背景采样。顶栏、浮层、AI 侧栏背后有内容
+   （滚动卡片 / 页面 / 正文），模糊保留。 */
+.side[data-glass-surface]::after,
+.mb-side[data-glass-surface]::after,
+.drawer[data-glass-surface]::after,
+.mb-detail[data-glass-surface]::after {
+  /* 没有模糊兜底，底色只能靠 tint 自己扛：实测暗色背景下 .60 只有 5.5:1，
+     抬到 .86/.84 后 ≥ 12:1，同时仍然透得出背景的色相。 */
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 62%
+    ),
+    linear-gradient(180deg, rgb(255 255 255 / .86) 0%, rgb(255 255 255 / .84) 100%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 顶栏与笔记本顶栏：面板比侧栏略扁，四周留白一致，像一枚浮在内容上的胶囊。 */
+.bar[data-glass-surface]::after,
+.mb-bar[data-glass-surface]::after {
+  inset: calc(var(--glass-gutter) - 2px) var(--glass-gutter);
+  border-radius: var(--glass-radius-chrome);
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 58%
+    ),
+    linear-gradient(180deg, rgb(255 255 255 / .84) 0%, rgb(255 255 255 / .66) 100%);
+}
+
+/* 侧板（抽屉 / 详情 / AI 侧栏）：贴边一侧原来用描边表示方向，
+   现在改为整块浮起——右侧留白同样能被看见。 */
+.drawer[data-glass-surface]::after,
+.mb-detail[data-glass-surface]::after,
+.mb-ai-side[data-glass-surface]::after {
+  border-radius: var(--glass-radius-panel);
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .93) 0%, rgb(253 254 255 / .90) 100%);
+}
+
+/* 笔记本的侧栏是暖灰底，面板沿用它的色相，免得两块 chrome 打架。 */
+.mb-side[data-glass-surface]::after {
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 62%
+    ),
+    linear-gradient(180deg, rgb(250 252 248 / .78) 0%, rgb(243 246 240 / .74) 100%);
+}
+
+/* ---------- 浮层 ---------------------------------------------------------- */
+
+/* 既有规则在 styles.css 第 415–417 行用 --material-float 覆盖过底色，这里再覆盖回来。 */
+.curation-popover[data-glass-surface],
+.ws-panel[data-glass-surface],
+.command-palette[data-glass-surface],
+[data-glass-surface="float"] {
+  background-color: transparent;
+}
+
+.command-palette[data-glass-surface] {
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .2) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 60%
+    ),
+    linear-gradient(180deg, rgb(255 255 255 / .88) 0%, rgb(252 253 255 / .82) 100%);
+  border: 1px solid var(--glass-hairline);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    0 1px 2px rgb(20 26 38 / .06),
+    0 25px 90px -30px rgb(18 38 66 / .40);
+}
+
+.ws-panel[data-glass-surface],
+.curation-popover[data-glass-surface] {
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 58%
+    ),
+    linear-gradient(180deg, rgb(255 255 255 / .88) 0%, rgb(251 252 255 / .80) 100%);
+  border: 1px solid var(--glass-hairline);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    var(--glass-shadow-float);
+}
+
+/* 对话框：modal 背景也属于材质层（既有 ::backdrop 已是模糊，这里统一强度） */
+dialog[data-glass-surface] {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .92) 0%, rgb(252 253 255 / .88) 100%);
+  border: 1px solid var(--glass-hairline);
+  box-shadow: inset 0 1px 0 var(--glass-bevel-top), var(--glass-shadow-float);
+}
+
+/* ---------- 控件 ---------------------------------------------------------- */
+
+/* 按钮：底色由 tint 决定，边缘高光让它在浅色底上「有厚度」而不是一块灰。 */
+.btn[data-glass-surface] {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .92) 0%, rgb(250 251 254 / .86) 100%);
+  border: 1px solid var(--glass-edge-line);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    0 1px 1px rgb(20 26 38 / .04);
+  transition: transform var(--glass-duration) var(--glass-spring), box-shadow var(--glass-duration) var(--glass-spring),
+    background-color var(--glass-duration) var(--glass-spring), border-color var(--glass-duration) var(--glass-spring);
+}
+
+.btn.primary[data-glass-surface] {
+  /* 主操作不玻璃化：它靠实色区分层级，玻璃只给一层顶部高光。 */
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .18) 0%, rgb(0 0 0 / .02) 100%);
+  border-color: rgb(255 255 255 / .18);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .45),
+    inset 0 -1px 0 rgb(0 0 0 / .08),
+    0 3px 9px rgb(0 122 255 / .20);
+}
+
+.btn.soft[data-glass-surface] {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .55) 0%, rgb(238 240 245 / .62) 100%);
+  border-color: transparent;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .70),
+    inset 0 -1px 0 rgb(20 26 38 / .04);
+}
+
+.icon-button[data-glass-surface] {
+  background-image: none;
+  box-shadow: none;
+  transition: background-color var(--glass-duration) var(--glass-spring), box-shadow var(--glass-duration) var(--glass-spring),
+    transform var(--glass-duration) var(--glass-spring);
+}
+
+.icon-button[data-glass-surface]:hover {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .80) 0%, rgb(244 246 250 / .70) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 0 0 1px var(--glass-edge-line);
+}
+
+/* 导航项：选中态是唯一的「彩色玻璃」，其余保持透明，避免侧栏变成一排胶囊。 */
+.nav[data-glass-surface] {
+  background-image: none;
+  box-shadow: none;
+  transition: background-color var(--glass-duration) var(--glass-spring), box-shadow var(--glass-duration) var(--glass-spring),
+    color var(--glass-duration) var(--glass-spring);
+}
+
+.nav[data-glass-surface]:hover {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .62) 0%, rgb(246 248 252 / .52) 100%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .55);
+}
+
+.nav.on[data-glass-surface] {
+  background-image:
+    radial-gradient(circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .3) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * .45)), transparent 70%),
+    linear-gradient(180deg, rgb(255 255 255 / .92) 0%, rgb(232 242 255 / .88) 100%);
+  color: #0066d6;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .95),
+    inset 0 0 0 1px rgb(180 208 245 / .70),
+    0 1px 2px rgb(20 60 120 / .06);
+}
+
+/* 分段控件：底槽是「凹」的，选中项是「凸」的，两者的斜面方向要反过来。 */
+.segmented {
+  background-image: linear-gradient(180deg, rgb(20 26 38 / .05) 0%, rgb(20 26 38 / .02) 100%);
+  box-shadow: inset 0 1px 2px rgb(20 26 38 / .06);
+}
+
+.segment[data-glass-surface] {
+  background-image: none;
+  box-shadow: none;
+}
+
+.segment.active[data-glass-surface] {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .96) 0%, rgb(250 251 254 / .92) 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .95),
+    0 1px 3px rgb(20 26 38 / .10);
+}
+
+/* 搜索框：常态是圆（见「顶端」一节），聚焦后展开成圆角输入框。
+   focus-within 时靠 accent 描边，不靠加亮底色。 */
+.search-wrap[data-glass-surface] {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .70) 0%, rgb(243 245 249 / .70) 100%);
+  border: 1px solid var(--glass-edge-line);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .80), inset 0 -1px 0 rgb(20 26 38 / .03);
+  transition: box-shadow var(--glass-duration) var(--glass-spring), border-color var(--glass-duration) var(--glass-spring),
+    background-color var(--glass-duration) var(--glass-spring);
+}
+
+.search-wrap[data-glass-surface]:focus-within {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .95) 0%, rgb(255 255 255 / .90) 100%);
+  border-color: rgb(0 122 255 / .55);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .95), 0 0 0 3px rgb(0 122 255 / .12);
+}
+
+/* 品牌图标按钮：只有悬停时才出现一层薄玻璃，常态保持「一枚印章」 */
+.brand-mark[data-glass-surface] {
+  background-image: none;
+  box-shadow: none;
+  transition: background-color var(--glass-duration) var(--glass-spring), box-shadow var(--glass-duration) var(--glass-spring);
+}
+
+.brand-mark[data-glass-surface]:hover {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .72) 0%, rgb(240 243 248 / .62) 100%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .85), inset 0 0 0 1px var(--glass-edge-line);
+}
+
+/* ---------- 指针与按压 ---------------------------------------------------- */
+
+@media (hover: hover) and (pointer: fine) {
+  [data-glass-surface="control"]:hover {
+    /* 悬停不再位移：鼠标扫过一排按钮时 1px 的上浮会连成「抖动」。
+       层级变化交给底色与高光，位移只留给按下。 */
+    transform: none;
+  }
+  [data-glass-surface="control"]:active,
+  [data-glass-pressed] {
+    /* 按下 1% 就够：2% 在 40px 高的控件上是 0.8px 的抖动，连着点会像在震。 */
+    transform: scale(.99);
+    transition-duration: 90ms;
+  }
+}
+
+/* 按压：颜色加深一点，形变由上面的 scale 负责；减少动态效果时下面统一取消。 */
+[data-glass-pressed] {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .35),
+    inset 0 0 0 1px var(--glass-edge-line),
+    inset 0 2px 5px rgb(20 26 38 / .10);
+}
+
+/* ---------- 无障碍 -------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  [data-glass-surface],
+  .btn[data-glass-surface],
+  .icon-button[data-glass-surface],
+  .nav[data-glass-surface],
+  .search-wrap[data-glass-surface],
+  .brand-mark[data-glass-surface] {
+    transition: none;
+  }
+  [data-glass-surface="control"]:hover,
+  [data-glass-surface="control"]:active,
+  [data-glass-pressed] {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --glass-tint: rgb(255 255 255 / .96);
+    --glass-tint-strong: rgb(255 255 255 / .99);
+    --glass-hairline: rgb(20 26 38 / .35);
+    --glass-edge-line: rgb(20 26 38 / .35);
+    --glass-bevel-top: transparent;
+    --glass-glare: 0;
+  }
+  /* html 前缀是为了压过 .side / .bar 这类单类规则自带的 backdrop-filter，
+     也压过文件末尾 flat 档的 (0,2,0)：系统偏好永远比档位更硬。 */
+  html [data-glass-surface] {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background-image: linear-gradient(180deg, var(--glass-tint) 0%, var(--glass-tint) 100%);
+  }
+}
+
+@media (forced-colors: active) {
+  html [data-glass-surface] {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background-image: none;
+    background-color: Canvas;
+    border: 1px solid CanvasText;
+    box-shadow: none;
+  }
+  html .nav.on[data-glass-surface] {
+    background-color: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+}
+
+/* ---------- 实验档：把位移滤镜接进表面 -------------------------------------- */
+
+/* glass-refraction.js 只负责生成滤镜并写 --glass-refraction-filter，这里才真正消费它。
+   能接的只有「背后有内容」的面：顶栏胶囊、浮层。侧栏与侧板背后是页面底色，
+   接上去只是把一块纯色再位移一次，白付成本。
+   同时把浮层 tint 降到 0.42/0.34：实测 tint .60–.80 会把位移压得看不见
+   （材质强度 69.5 对 72.5），而 .03 又几乎没着色。这一步只影响实验档，
+   发布形态的 tint 不动——那里的对比度是 §6.1 实测过的。 */
+html[data-glass-refraction="on"] .bar .toolbar-actions[data-glass-refraction="on"],
+html[data-glass-refraction="on"] [data-glass-surface="float"][data-glass-refraction="on"] {
+  backdrop-filter: blur(2px) saturate(1.6) var(--glass-refraction-filter, none);
+  -webkit-backdrop-filter: blur(2px) saturate(1.6) var(--glass-refraction-filter, none);
+}
+
+html[data-glass-refraction="on"] [data-glass-surface="float"][data-glass-refraction="on"] {
+  background-image:
+    radial-gradient(
+      circle at calc(var(--glass-glare-x, .5) * 100%) calc(var(--glass-glare-y, .35) * 100%),
+      rgb(255 255 255 / calc(var(--glass-glare-o, 0) * var(--glass-glare))),
+      transparent 55%
+    ),
+    linear-gradient(180deg, rgb(255 255 255 / .42) 0%, rgb(255 255 255 / .34) 100%);
+}
+
+/* ---------- 回退：flat 档 -------------------------------------------------- */
+/* 放在文件末尾，靠「同特异性、后写者胜」压过 .side / .bar / .search-wrap 等
+   具体规则，以及基元上的 backdrop-filter。类名写法同时支持两种情况：
+   flat 写在 <html> 上（运行时），或写在一层容器上（lab 页并排展示）。 */
+[data-glass-tier="flat"] [data-glass-surface],
+[data-glass-tier="flat"][data-glass-surface] {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background-image: linear-gradient(180deg, var(--glass-tint) 0%, var(--glass-tint) 100%);
+  box-shadow:
+    inset 0 0 0 1px var(--glass-hairline),
+    var(--glass-shadow);
+}
+
+/* ---------- full 档：边缘色散 -------------------------------------------------- */
+
+/* 冷暖各一条 1px 内描边：真实玻璃的边缘会把波长分开，这里用最便宜的方式暗示它。
+   放在最后是因为要覆盖 .side / .bar / .curation-popover 的 box-shadow。 */
+[data-glass-tier="full"] [data-glass-surface="chrome"],
+[data-glass-tier="full"] [data-glass-surface="float"] {
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    inset 1px 0 0 var(--glass-fringe-warm),
+    inset -1px 0 0 var(--glass-fringe-cool),
+    var(--glass-shadow);
+}
+
+[data-glass-tier="full"] [data-glass-surface="float"] {
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    inset 1px 0 0 var(--glass-fringe-warm),
+    inset -1px 0 0 var(--glass-fringe-cool),
+    var(--glass-shadow-float);
+}
+
+/* ---------- 浮起面板的状态覆写（::after） ---------------------------------- */
+
+/* 框架面与侧板的玻璃画在 ::after 上，所以「关模糊 / 换成实心 / 加色散」必须写在同一层：
+   元素级的 flat、高对比规则管不到伪元素。 */
+
+/* flat：面板实心，不再采样背景。 */
+[data-glass-tier="flat"] .side[data-glass-surface]::after,
+[data-glass-tier="flat"] .bar[data-glass-surface]::after,
+[data-glass-tier="flat"] .mb-side[data-glass-surface]::after,
+[data-glass-tier="flat"] .mb-bar[data-glass-surface]::after,
+[data-glass-tier="flat"] .drawer[data-glass-surface]::after,
+[data-glass-tier="flat"] .mb-detail[data-glass-surface]::after,
+[data-glass-tier="flat"] .mb-ai-side[data-glass-surface]::after {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background-image: linear-gradient(180deg, var(--glass-tint) 0%, var(--glass-tint) 100%);
+  border-color: var(--glass-edge-line);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .70),
+    0 1px 2px rgb(20 26 38 / .05),
+    0 10px 24px -20px rgb(20 26 38 / .35);
+}
+
+/* 提高对比度：面板近实心、去高光。 */
+@media (prefers-contrast: more) {
+  .side[data-glass-surface]::after,
+  .bar[data-glass-surface]::after,
+  .mb-side[data-glass-surface]::after,
+  .mb-bar[data-glass-surface]::after,
+  .drawer[data-glass-surface]::after,
+  .mb-detail[data-glass-surface]::after,
+  .mb-ai-side[data-glass-surface]::after {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background-image: linear-gradient(180deg, var(--glass-tint) 0%, var(--glass-tint) 100%);
+    border-color: var(--glass-edge-line);
+  }
+}
+
+/* 强制色：交出着色，用系统色画边界。 */
+@media (forced-colors: active) {
+  .side[data-glass-surface]::after,
+  .bar[data-glass-surface]::after,
+  .mb-side[data-glass-surface]::after,
+  .mb-bar[data-glass-surface]::after,
+  .drawer[data-glass-surface]::after,
+  .mb-detail[data-glass-surface]::after,
+  .mb-ai-side[data-glass-surface]::after {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background-image: none;
+    background-color: Canvas;
+    border: 1px solid CanvasText;
+    box-shadow: none;
+  }
+}
+
+/* full 档：面板边缘的冷暖色散。 */
+[data-glass-tier="full"] .side[data-glass-surface]::after,
+[data-glass-tier="full"] .bar[data-glass-surface]::after,
+[data-glass-tier="full"] .mb-side[data-glass-surface]::after,
+[data-glass-tier="full"] .mb-bar[data-glass-surface]::after,
+[data-glass-tier="full"] .drawer[data-glass-surface]::after,
+[data-glass-tier="full"] .mb-detail[data-glass-surface]::after,
+[data-glass-tier="full"] .mb-ai-side[data-glass-surface]::after {
+  box-shadow:
+    inset 0 1px 0 var(--glass-bevel-top),
+    inset 0 -1px 0 var(--glass-bevel-bottom),
+    inset 1px 0 0 var(--glass-fringe-warm),
+    inset -1px 0 0 var(--glass-fringe-cool),
+    0 1px 2px rgb(20 26 38 / .05),
+    0 14px 34px -22px rgb(20 26 38 / .45);
+}

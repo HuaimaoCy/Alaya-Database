@@ -1,13 +1,16 @@
 import { icon } from './icons.js'
 import { createLoadingStatus } from './loading.js'
-import { NOTE_TYPES, STRUCTURED_FIELDS, normalizeFields } from '../../addons/mistakebook/fields.mjs'
+import { NOTE_TYPES, NEW_NOTE_TYPES, STRUCTURED_FIELDS, normalizeFields } from '../../addons/mistakebook/fields.mjs'
 import { SIMULATIONS } from '../../addons/mistakebook/simulations.mjs'
 import { extractWords, normalizeWord } from '../../addons/mistakebook/words.mjs'
 import { renderRelationTree, vocabularyGraph } from './relations.js'
-import { attachSplitter } from './layout.js'
+import { createNotebookLayoutAdapter, NOTEBOOK_LAYOUT_DEFAULTS } from './workspace-layout.js'
 import { renderTagEditor, renderTagCloud } from './tags.js'
 import { createSidebarController, renderSidebarConfig, migrateLegacySidebar } from './sidebar.js'
 import { renderRich } from './markdown.js'
+import { createCanvasView } from './freeform-canvas.js'
+import { embedLayout, settingsTabs } from './glass-appearance.js'
+import { createPapers } from './papers.js'
 
 const h = (tag, props = {}, ...children) => {
   const node = document.createElement(tag)
@@ -56,10 +59,13 @@ async function filePayload(file, allowPDF = false) {
 }
 const firstMeaningfulLine = text => text.split(/\r?\n/).map(line => line.replace(/^\s*(?:#{1,6}\s*)?(?:[-*+]\s+|>\s*|\d{1,3}[.、)]\s*)?/, '').replace(/[*`]/g, '').trim()).find(Boolean)?.slice(0, 60) ?? ''
 
-export function mountMistakebook({ beforeEnter }) {
+export function mountMistakebook({ beforeEnter, appearance,standalone=false }) {
   const memory = document.querySelector('.app-shell')
   const shell = h('div', { class: 'mb-shell', hidden: true, 'aria-label': '笔记本' })
-  const state = { data: null, view: 'all', type: '', subjectID: '', nodeID: '', query: '', tag: '', order: 'priority', draft: null, dirty: false, busy: false, review: false, showAnswer: false, picking: false, selection: new Set() }
+  const state = { data: null, view: 'all', type: '', subjectID: '', nodeID: '', query: '', tag: '', order: 'priority', page: 'view', draft: null, dirty: false, busy: false, review: false, showAnswer: false, picking: false, selection: new Set() }
+  // 自由画布视图在 shell 装配完成后创建；先声明，避免在视图切换里踩到 TDZ。
+  let canvasView = null
+  let paperParent=null
   const handwritingDrafts = new WeakMap()
   let messageTimer
   const notify = (message, error = false) => {
@@ -79,13 +85,17 @@ export function mountMistakebook({ beforeEnter }) {
   const dirty = () => { state.dirty = true; const hint = document.getElementById('mb-save-state'); if (hint) { hint.textContent = '有未保存的修改'; hint.classList.add('dirty') }; const saveButton = document.getElementById('mb-save'); if (saveButton) saveButton.disabled = false }
   const names = () => new Map((state.data?.taxonomy.nodes ?? []).map(node => [node.id, node.name]))
   const changeView = async (view, subjectID = '', nodeID = '', type = '') => {
+    if (canvasView?.isOpen()) await canvasView.close()
     if (!await discard()) return
     Object.assign(state, { view, subjectID, nodeID, type, tag: '', draft: null, dirty: false, review: false, picking: false }); state.selection.clear(); await load()
   }
   const load = async () => {
+    await prefsWrite
     state.data = await call('list', { view: state.view, type: state.type, subjectID: state.subjectID, nodeID: state.nodeID, query: state.query, tag: state.tag, order: state.order })
     const incoming = state.data.prefs
-    prefsCache = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? { ...incoming } : {}
+    const stored = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : {}
+    prefsCache = prefsSaved === prefsRevision ? { ...stored } : { ...stored, ...prefsCache }
+    notebookLayout.apply({ ...LAYOUT_DEFAULTS, ...prefsCache })
     if (['priority', 'updated', 'manual'].includes(prefsCache.order) && state.order !== prefsCache.order) {
       state.order = prefsCache.order
       const sort = document.getElementById('mb-sort'); if (sort) sort.value = state.order
@@ -99,11 +109,14 @@ export function mountMistakebook({ beforeEnter }) {
   }
   // 图标即切换：品牌图标本身是模式切换按钮（与数据库侧一致）。
   const switchButton = button([icon('vault')], async () => {
+    if(standalone)return
     if (document.querySelector('dialog[open]') || !await discard()) return
+    if (canvasView?.isOpen()) await canvasView.close()
     localStorage.setItem('alaya.mode', 'memory')
     state.draft = null; state.dirty = false; shell.hidden = true; memory.hidden = false; document.body.dataset.mode = 'memory'
     document.getElementById('mode-switch').focus()
   }, false, { class: 'mb-book-mark', id: 'mb-mode-switch', title: '切换到数据库', 'aria-label': '切换到数据库', 'aria-pressed': 'true' })
+  if(standalone){switchButton.removeAttribute('id');switchButton.removeAttribute('aria-pressed');switchButton.title='Alaya Notebook';switchButton.setAttribute('aria-label','Alaya Notebook');switchButton.classList.add('brand-mark');switchButton.tabIndex=-1;switchButton.style.pointerEvents='none'}
   const search = h('input', { type: 'search', class: 'search', id: 'mb-query', placeholder: '搜索笔记、模型与单词', 'aria-label': '搜索笔记' })
   let searchTimer
   search.addEventListener('input', () => {
@@ -118,38 +131,46 @@ export function mountMistakebook({ beforeEnter }) {
   // —— 自由布局：侧边栏/详情宽度用 CSS 变量承载，拖动分隔条即改写并持久化 ——
   // 布局与排序偏好存笔记本数据库（随 list 返回 prefs，写入走 prefs.save），
   // 渲染层不再使用 localStorage。prefsCache 是内存镜像，写入异步落库。
-  const LAYOUT_DEFAULTS = { sideW: 220, detailW: 440, detailSide: 'right' }
+  const LAYOUT_DEFAULTS = NOTEBOOK_LAYOUT_DEFAULTS
   let prefsCache = {}
+  let notebookLayout = null, prefsWrite = Promise.resolve(), prefsRevision = 0, prefsSaved = 0
   const layoutPrefs = () => ({ ...LAYOUT_DEFAULTS, ...prefsCache })
-  const applyLayout = (prefs = layoutPrefs()) => {
-    shell.style.setProperty('--mb-side-w', `${prefs.sideW}px`)
-    shell.style.setProperty('--mb-detail-w', `${prefs.detailW}px`)
-    shell.classList.toggle('detail-left', prefs.detailSide === 'left')
+  // 不使用 guard：排序/设置等调用方已经持有 guard，嵌套 guard 会静默丢弃保存。
+  // 串行写入快照，保证快速拖动不会乱序；失败保留内存偏好并明确提示。
+  const savePrefs = next => {
+    const snapshot = { ...next }, revision = ++prefsRevision
+    prefsCache = snapshot
+    notebookLayout?.apply(snapshot)
+    prefsWrite = prefsWrite.then(() => call('prefs.save', snapshot)).then(() => {
+      prefsSaved = revision
+    }).catch(error => notify(`布局或排序保存失败：${error.message || error}；请重试修改。`, true))
+    return prefsWrite
   }
-  const savePrefs = next => { prefsCache = next; void guard(() => call('prefs.save', next)); applyLayout(next) }
-  const saveLayout = prefs => savePrefs(prefs)
-  const setPanelWidth = (name, width, min, max) => {
-    const prefs = layoutPrefs()
-    prefs[name] = Math.round(Math.min(max, Math.max(min, width)))
-    saveLayout(prefs)
-  }
+  const saveLayout = prefs => notebookLayout.set(prefs)
   const sideSplitter = h('div', { class: 'mb-splitter', id: 'mb-side-split', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '拖动调整侧边栏宽度，双击恢复默认', title: '拖动调整宽度 · 双击复位' })
   const detailSplitter = h('div', { class: 'mb-splitter', id: 'mb-detail-split', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '拖动调整详情面板宽度，双击恢复默认', title: '拖动调整宽度 · 双击复位', hidden: true })
-  let sideOrigin = 0, detailOrigin = 0
-  attachSplitter(sideSplitter, { onStart: () => { sideOrigin = layoutPrefs().sideW }, onResize: ({ dx }) => setPanelWidth('sideW', sideOrigin + dx, 170, 320), onReset: () => setPanelWidth('sideW', 220, 170, 320) })
-  attachSplitter(detailSplitter, {
-    onStart: () => { detailOrigin = layoutPrefs().detailW },
-    onResize: ({ dx }) => setPanelWidth('detailW', detailOrigin + dx * (layoutPrefs().detailSide === 'left' ? 1 : -1), 320, 760),
-    onReset: () => setPanelWidth('detailW', 440, 320, 760),
-  })
   // —— 自定义侧边栏：区块注册表驱动，顺序与显隐持久化在本机 ——
   const tagNav = h('div', { class: 'mb-side-tags' })
   const sideScroll = h('div', { class: 'mb-side-scroll', id: 'mb-side-scroll' })
   // 条目注册表：itemId（view:all / type:physics / subject:english）→ 可点击
   // 元素；侧边栏控制器与配置对话框共用这一份目录。
-  const viewItems = () => [['all', '全部笔记', 'library'], ['due', '待复习', 'task'], ['mastered', '已掌握', 'check'], ['archived', '归档', 'folder'], ['trash', '回收站', 'hidden']].map(([view, label, symbol]) => ({ id: `view:${view}`, label, view, element: button([icon(symbol), h('span', { class: 'nav-label', text: label }), h('span', { class: 'count', text: state.data?.stats[view] ?? 0 })], () => changeView(view), false, { class: `nav${state.view === view && !state.subjectID && !state.type ? ' on' : ''}`, 'data-mb-view': view, 'aria-current': state.view === view && !state.subjectID && !state.type ? 'page' : 'false' }) }))
-  const typeItems = () => Object.entries(NOTE_TYPES).map(([type, meta]) => ({ id: `type:${type}`, label: meta.label, type, element: button([icon(meta.icon), h('span', { class: 'nav-label', text: meta.label }), h('span', { class: 'count', text: state.data?.stats.types[type] ?? 0 })], () => changeView('all', '', '', type), false, { class: `nav${state.type === type ? ' on' : ''}`, 'data-mb-type': type }) }))
-  const subjectItems = () => (state.data?.taxonomy.nodes ?? []).filter(node => !node.parentID).map(node => ({ id: `subject:${node.id}`, label: node.name, subject: node.id, element: button([h('span', { class: 'mb-subject-dot', text: node.name.slice(0, 1) }), h('span', { class: 'nav-label', text: node.name }), h('span', { class: 'count', text: state.data?.stats.subjects[node.id] ?? 0 })], () => changeView('all', node.id), false, { class: `nav${state.subjectID === node.id ? ' on' : ''}`, 'data-mb-subject': node.id }) }))
+  // 条目显示名可被侧边栏配置覆盖（双击重命名写入 sidebar.labels）。
+  // 读控制器里的即时配置，而不是上一次 list 返回的快照，否则改完要等重载才生效。
+  let sideLabelsCache = {}
+  const sideLabel = id => sideLabelsCache[id] ?? null
+  const viewItems = () => [['all', '全部笔记', 'library'], ['due', '待复习', 'task'], ['mastered', '已掌握', 'check'], ['trash', '回收站', 'hidden']].map(([view, fallback, symbol]) => {
+    const label = sideLabel(`view:${view}`) ?? fallback
+    return { id: `view:${view}`, label, view, element: button([icon(symbol), h('span', { class: 'nav-label', text: label }), h('span', { class: 'count', text: state.data?.stats[view] ?? 0 })], () => changeView(view), false, { class: `nav${state.view === view && !state.subjectID && !state.type ? ' on' : ''}`, 'data-mb-view': view, 'aria-current': state.view === view && !state.subjectID && !state.type ? 'page' : 'false' }) }
+  })
+  const typeItems = () => [...NEW_NOTE_TYPES,'paper'].map(type => {
+    const meta=NOTE_TYPES[type]
+    const label = sideLabel(`type:${type}`) ?? meta.label
+    return { id: `type:${type}`, label, type, element: button([icon(meta.icon), h('span', { class: 'nav-label', text: label }), h('span', { class: 'count', text: state.data?.stats.types[type] ?? 0 })], () => changeView('all', '', '', type), false, { class: `nav${state.type === type ? ' on' : ''}`, 'data-mb-type': type }) }
+  }).concat({id:'type:canvas',label:'自由画布',element:button([icon('layers'),h('span',{class:'nav-label',text:'自由画布'})],()=>openCanvas(),false,{class:'nav',id:'mb-open-canvas','data-mb-type':'canvas'})})
+  const subjectItems = () => (state.data?.taxonomy.nodes ?? []).filter(node => !node.parentID).map(node => {
+    const label = sideLabel(`subject:${node.id}`) ?? node.name
+    return { id: `subject:${node.id}`, label, subject: node.id, element: button([h('span', { class: 'mb-subject-dot', text: label.slice(0, 1) }), h('span', { class: 'nav-label', text: label }), h('span', { class: 'count', text: state.data?.stats.subjects[node.id] ?? 0 })], () => changeView('all', node.id), false, { class: `nav${state.subjectID === node.id ? ' on' : ''}`, 'data-mb-subject': node.id }) }
+  })
   const allSideItems = () => [...viewItems(), ...typeItems(), ...subjectItems()]
   const itemFor = id => allSideItems().find(item => item.id === id) ?? null
   // 侧边栏配置存数据库（随 list 返回），写入走 sidebar.save；旧 localStorage
@@ -167,7 +188,7 @@ export function mountMistakebook({ beforeEnter }) {
       h('div', { class: 'row mb-side-config-foot' }, h('span', { class: 'spacer' }),
         button('恢复默认侧边栏', () => { sidebar.setConfig({ sections: [], hidden: [] }); notify('侧边栏已恢复默认') }, false, { class: 'btn ghost', id: 'mb-side-config-reset' }))))
   }
-  const heading = h('h1', { id: 'mb-title', text: '全部笔记' }), subtitle = h('p', { id: 'mb-subtitle', text: '记录问题，建立模型，积累自己的解题方法。' })
+  const heading = h('h1', { id: 'mb-title', text: '全部笔记' })
   const jsonPicker = h('input', { type: 'file', accept: '.json,application/json', hidden: true, id: 'mb-json-picker', onChange: event => void guard(async () => {
     const file = event.target.files[0]; event.target.value = ''; if (!file) return
     if (!await discard()) return
@@ -194,6 +215,7 @@ export function mountMistakebook({ beforeEnter }) {
   // 模式下拖动会自动切换过去（排序偏好一并记住）。多选勾选时禁用拖动。
   let dragNoteID = ''
   const makeDraggable = (card, row) => {
+    card.addEventListener('dblclick',event=>{if(state.picking)return;event.preventDefault();void guard(()=>select(row.id))})
     card.setAttribute('draggable', 'true')
     card.addEventListener('dragstart', event => {
       if (state.picking) { event.preventDefault(); return }
@@ -224,9 +246,26 @@ export function mountMistakebook({ beforeEnter }) {
       })
     })
   }
+  const wireReviewDrop=(element,view)=>{
+    if(!['due','mastered','trash'].includes(view))return
+    element.addEventListener('dragover',event=>{if(!dragNoteID)return;event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect='move';element.classList.add('drop-target')})
+    element.addEventListener('dragleave',()=>element.classList.remove('drop-target'))
+    element.addEventListener('drop',event=>{
+      if(!dragNoteID)return
+      event.preventDefault();event.stopPropagation();element.classList.remove('drop-target')
+      const id=dragNoteID;dragNoteID=''
+      void guard(async()=>{
+        if(!await discard())return
+        await call('action',{id,action:view==='trash'?'delete':view})
+        if(state.draft?.id===id){state.draft=null;state.dirty=false}
+        await load();notify(view==='mastered'?'已移至「已掌握」':view==='due'?'已移至「待复习」':'已移至回收站')
+      })
+    })
+  }
   // —— AI 侧边栏：右缘滑出；问答记录持久化在笔记本数据库，可整理成笔记 ——
   const aiChat = { messages: [], running: false, loaded: false }
   const aiSide = h('aside', { class: 'mb-ai-side', id: 'mb-ai-side', hidden: true, 'aria-label': 'AI 助手' })
+  const closeAISide=()=>{aiSide.hidden=true;shell.classList.remove('ai-on');document.getElementById('mb-ai-toggle')?.setAttribute('aria-expanded','false')}
   const paintAI = () => {
     const list = aiSide.querySelector('#mb-ai-messages')
     if (!list) return
@@ -283,40 +322,90 @@ export function mountMistakebook({ beforeEnter }) {
     aiSide.append(
       h('div', { class: 'mb-ai-head' }, h('strong', { text: 'AI 学习助手' }), h('span', { class: 'cap', text: '记录保存在本机数据库' }), h('span', { class: 'spacer' }),
         h('button', { type: 'button', class: 'btn ghost', id: 'mb-ai-clear', text: '清空记录', title: '清空全部 AI 查询记录', onClick: () => void guard(clearAIHistory) }),
-        h('button', { type: 'button', class: 'icon-button', 'aria-label': '收起 AI 助手', title: '收起', onClick: () => { aiSide.hidden = true } }, icon('close'))),
+        h('button', { type: 'button', class: 'icon-button', 'aria-label': '收起 AI 助手', title: '收起', onClick: closeAISide }, icon('close'))),
       h('div', { class: 'mb-ai-messages', id: 'mb-ai-messages' }),
       h('form', { class: 'mb-ai-form', onSubmit: event => { event.preventDefault(); void sendAI() } },
         h('textarea', { class: 'area', id: 'mb-ai-input', rows: 3, placeholder: '问问题、要思路、核对要点…（Enter 发送，Shift+Enter 换行）', onKeydown: event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendAI() } } }),
         h('button', { type: 'button', class: 'btn primary', id: 'mb-ai-send', text: '发送', onClick: () => void sendAI() })))
     paintAI()
   }
-  const toggleAISide = () => {
-    if (aiSide.hidden) {
+  const showAISide = () => {
       if (!aiSide.childElementCount) buildAISide()
       aiSide.hidden = false
+      shell.classList.add('ai-on')
+      document.getElementById('mb-ai-toggle')?.setAttribute('aria-expanded','true')
       aiSide.querySelector('#mb-ai-input')?.focus()
-      if (!aiChat.loaded) void guard(loadAIHistory)
-    } else aiSide.hidden = true
+      if (!aiChat.loaded) void loadAIHistory().catch(error=>notify(error.message,true))
   }
+  const toggleAISide=()=>{if(aiSide.hidden)showAISide();else closeAISide()}
+  const createMenu=h('details',{class:'mb-create-menu',id:'mb-create-menu'},
+    h('summary',{class:'icon-button mb-create-trigger',id:'mb-new',title:'新建','aria-label':'新建','aria-haspopup':'menu'},icon('plus')),
+    h('div',{class:'mb-create-options',role:'menu','aria-label':'新建内容'},
+      ...NEW_NOTE_TYPES.map(type=>button([icon(NOTE_TYPES[type].icon),NOTE_TYPES[type].label],()=>{createMenu.open=false;return newQuestion(type)},false,{class:'mb-create-option',role:'menuitem','data-new-type':type})),
+      button([icon('summary'),'编成试卷'],()=>{createMenu.open=false;return compilePaper()},false,{class:'mb-create-option',role:'menuitem',id:'mb-compile-paper'}),
+      h('hr'),
+      button([icon('layers'),'自由画布'],()=>{createMenu.open=false;return openCanvas()},false,{class:'mb-create-option',role:'menuitem',id:'mb-canvas-button'}),
+      button([icon('attachment'),'录入'],()=>{createMenu.open=false;return openImport()},false,{class:'mb-create-option',role:'menuitem',id:'mb-import'})))
+  document.addEventListener('click',event=>{if(!createMenu.contains(event.target))createMenu.open=false})
+  createMenu.addEventListener('keydown',event=>{
+    const items=[...createMenu.querySelectorAll('[role="menuitem"]')]
+    if(event.key==='Escape'){event.preventDefault();createMenu.open=false;document.getElementById('mb-new').focus()}
+    if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)){event.preventDefault();createMenu.open=true;const current=items.indexOf(document.activeElement),next=event.key==='Home'?0:event.key==='End'?items.length-1:(current+(event.key==='ArrowDown'?1:-1)+items.length)%items.length;items[next].focus()}
+  })
   shell.append(h('aside', { class: 'mb-side' },
     h('div', { class: 'brand' }, switchButton, h('div', {}, h('div', { class: 'brand-name', text: '笔记本' }), h('div', { class: 'brand-caption', text: 'ALAYA NOTEBOOK' }))),
     sideScroll,
-    h('div', { class: 'mb-side-bottom' }, h('div', { class: 'mb-local' }, h('span', { class: 'library-dot' }), h('span', { text: '独立保存在本机' })),
+    h('div', { class: 'mb-side-bottom' },
       button([icon('grid'), '自定义侧边栏'], () => openSidebarConfig(), false, { class: 'nav', id: 'mb-sidebar-config', title: '调整侧边栏区块的顺序与显隐' }),
       button([icon('settings'), '笔记本设置'], openSettings, false, { class: 'nav', id: 'mb-settings' }))),
     sideSplitter,
-    h('div', { class: 'mb-workspace' }, h('header', { class: 'mb-bar' }, h('div', { class: 'breadcrumb' }, icon('book'), h('span', { text: '笔记本' })),
-      h('div', { class: 'toolbar-actions' }, h('label', { class: 'search-wrap' }, icon('search'), search), button('录入', () => openImport(), false, { id: 'mb-import', title: '识别或粘贴，导入错题、笔记与词汇' }), button([icon('plus'), '新建笔记'], openCreate, true, { id: 'mb-new' }))),
-      h('div', { class: 'mb-body' }, h('main', { class: 'mb-main' }, h('div', { class: 'mb-page-heading' }, h('div', {}, heading, subtitle), h('div', { class: 'mb-total', id: 'mb-total' })),
-        h('div', { class: 'mb-board' }, order, h('span', { class: 'spacer' }), button('AI 助手', toggleAISide, false, { class: 'btn soft', id: 'mb-ai-toggle', title: '打开 AI 学习助手侧边栏' }), button('查词典', openLookup, false, { class: 'btn soft', id: 'mb-lookup', title: '查一个单词，自动存入单词库；重复查询累计背诵次数' }), button('单词检测', openQuiz, false, { class: 'btn soft', id: 'mb-quiz' }), pickButton, moreMenu), searchFilter, list), detailSplitter, detail),
-      h('footer', { class: 'mb-foot' }, h('span', { text: '笔记本 · 本地保存' }), h('span', { class: 'spacer' }))), jsonPicker, h('div', { id: 'mb-status', class: 'mb-status', role: 'status', 'aria-live': 'polite' }))
+    h('div', { class: 'mb-workspace' }, h('header', { class: 'mb-bar' },
+      // 与数据库侧同一个顶端结构：左侧圆形搜索，右侧一条「新建」组。
+      h('div', { class: 'bar-left' }, h('label', { class: 'search-wrap' }, icon('search'), search)),
+      h('div', { class: 'toolbar-actions' },
+        button([icon('settings')], openSettings, false, {id:'mb-workspace-settings',class:'icon-button',title:'设置','aria-label':'设置'}),
+        button(icon('sparkles'),toggleAISide,false,{id:'mb-ai-toggle',class:'icon-button',title:'AI 助手','aria-label':'AI 助手'}),
+        button(icon('book'),openLookup,false,{id:'mb-lookup',class:'icon-button',title:'查词典','aria-label':'查词典'}),
+        createMenu)),
+      h('div', { class: 'mb-body' }, h('main', { class: 'mb-main' }, h('div', { class: 'mb-page-heading' }, h('div', {}, heading), h('div', { class: 'mb-total', id: 'mb-total' })),
+        h('div', { class: 'mb-board' }, order, h('span', { class: 'spacer' }), button('单词检测', openQuiz, false, { class: 'btn soft', id: 'mb-quiz' }), pickButton, moreMenu), searchFilter, list), detailSplitter, detail),
+      ), jsonPicker, h('div', { id: 'mb-status', class: 'mb-status', role: 'status', 'aria-live': 'polite' }))
   document.body.append(shell)
   document.body.append(aiSide)
-  applyLayout()
-  document.getElementById('mode-switch').addEventListener('click', () => void guard(async () => {
+  notebookLayout = createNotebookLayoutAdapter({
+    shell, read: () => prefsCache, write: savePrefs, icon, onStatus: notify,
+    menuHost: document.createElement('div'),
+    expandHost: shell.querySelector('.mb-bar .toolbar-actions'),
+    focusExitHost: shell.querySelector('.mb-bar .toolbar-actions'),
+    escapeGuard: () => !shell.hidden && !canvasView?.isOpen(),
+  })
+  // —— 自由画布：世界坐标版面，文档存在笔记本域（notebook_meta 的 canvas 键），
+  //    随笔记本导出/导入与备份一起走，绝不进入数据库（记忆）域。
+  const callCanvas = async (action, body) => {
+    if (typeof window.vault?.canvas !== 'function') throw new Error('当前版本不支持自由画布，请更新到最新版')
+    const reply = await window.vault.canvas(action, body)
+    if (!reply?.ok) throw new Error(reply?.error || '画布操作失败')
+    return reply.result
+  }
+  canvasView = createCanvasView({
+    host: shell.querySelector('.mb-workspace'), shell, h, icon, dialog,
+    call: callCanvas, notify, confirm,
+    notes: async () => (await call('list', { view: 'all', order: 'updated' })).records,
+    openNote: async id => {
+      await canvasView.close()
+      if (!state.data?.records?.some(row => row.id === id)) await load()
+      await select(id)
+    },
+  })
+  async function openCanvas() {
+    if (!await discard()) return
+    await canvasView.open()
+  }
+  const enterNotebook=async()=>{
     if (!await beforeEnter()) return
-    await load(); localStorage.setItem('alaya.mode', 'notebook'); document.getElementById('status').classList.remove('show'); memory.hidden = true; shell.hidden = false; document.body.dataset.mode = 'mistakebook'; search.focus()
-  }))
+    await load(); localStorage.setItem('alaya.mode', 'notebook'); document.getElementById('status')?.classList.remove('show');if(memory)memory.hidden=true;shell.hidden=false;document.body.dataset.mode='mistakebook';search.focus()
+  }
+  document.getElementById('mode-switch')?.addEventListener('click',()=>void guard(enterNotebook))
   const wireClassify = (element, payload) => {
     if (!element || !payload || !(payload.subjectID || payload.tag)) return
     element.addEventListener('dragover', event => { if (!dragNoteID) return; event.preventDefault(); element.classList.add('drop-target') })
@@ -333,38 +422,66 @@ export function mountMistakebook({ beforeEnter }) {
       })
     })
   }
+  // 侧边栏区块标题：双击就地改名（写回数据库的 sidebar 配置）。
+  function beginSideRename(id, labelNode) {
+    const config = sidebar.config()
+    const section = config.sections.find(row => row.id === id)
+    if (!section || !labelNode?.isConnected) return
+    const input = h('input', { class: 'input mb-side-rename-input', id: 'mb-side-rename-live', value: section.label, 'aria-label': '区块名称' })
+    const finish = commit => {
+      if (!input.isConnected) return
+      const text = input.value.trim().slice(0, 30)
+      if (commit && text && text !== section.label) sidebar.setConfig({ ...config, sections: config.sections.map(row => row.id === id ? { ...row, label: text } : row) })
+      else renderSide()
+    }
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); finish(true) }
+      if (event.key === 'Escape') { event.preventDefault(); finish(false) }
+    })
+    input.addEventListener('blur', () => finish(true))
+    labelNode.replaceWith(input)
+    input.focus(); input.select()
+  }
+  const sideSectionLabel = section => {
+    const label = h('span', { class: 'mb-side-label', text: section.label, title: '双击重命名' })
+    label.addEventListener('dblclick', event => { event.preventDefault(); event.stopPropagation(); beginSideRename(section.id, label) })
+    return label
+  }
+  const sideSummary = section => h('summary', {}, sideSectionLabel(section))
+
   function renderSide() {
     const stats = state.data.stats
     const config = sidebar.config()
+    sideLabelsCache = { ...(config.labels ?? {}) }
     const hidden = new Set(config.hidden)
     const navFor = { views: sideViews, types: categories, subjects: subjects }
     const sections = []
     for (const section of config.sections) {
       if (hidden.has(section.id)) continue
       if (section.tags) {
-        sections.push(h('details', { class: 'mb-side-group', id: 'mb-tags-wrap', 'data-side-section': 'tags' }, h('summary', { text: section.label }), tagNav))
+        sections.push(h('details', { class: 'mb-side-group', id: 'mb-tags-wrap', 'data-side-section': 'tags' }, sideSummary(section), tagNav))
         continue
       }
       const builtinNav = navFor[section.id]
       const nav = builtinNav ?? h('nav', { class: 'mb-side-custom', 'aria-label': section.label })
       const placed = section.items.filter(id => !hidden.has(id)).map(itemFor).filter(Boolean)
       nav.replaceChildren(...placed.map(item => item.element))
-      for (const item of placed) if (item.subject) wireClassify(item.element, { subjectID: item.subject })
+      for (const item of placed) {if (item.subject) wireClassify(item.element, { subjectID: item.subject });if(item.view)wireReviewDrop(item.element,item.view)}
       if (builtinNav) {
-        if (section.id === 'views') sections.push(h('div', { class: 'mb-side-section', 'data-side-section': 'views' }, h('div', { class: 'side-head', text: section.label }), nav))
-        else if (section.id === 'types') sections.push(h('details', { class: 'mb-side-group', id: 'mb-types-wrap', 'data-side-section': 'types', open: true }, h('summary', { text: section.label }), nav))
+        if (section.id === 'views') sections.push(h('div', { class: 'mb-side-section', 'data-side-section': 'views' }, h('div', { class: 'side-head' }, sideSectionLabel(section)), nav))
+        else if (section.id === 'types') sections.push(h('details', { class: 'mb-side-group', id: 'mb-types-wrap', 'data-side-section': 'types', open: true }, sideSummary(section), nav))
         else {
           if (state.subjectID && placed.some(item => item.subject === state.subjectID)) {
             const nodes = state.data.taxonomy.nodes.filter(node => node.subjectID === state.subjectID && node.parentID === state.subjectID)
             nav.append(h('div', { class: 'mb-topics' }, nodes.map(node => button(node.name, () => changeView('all', state.subjectID, node.id), false, { class: `nav${state.nodeID === node.id ? ' on' : ''}` }))))
           }
-          const wrap = h('details', { class: 'mb-side-group', id: 'mb-subjects-wrap', 'data-side-section': 'subjects' }, h('summary', { text: section.label }), nav)
+          const wrap = h('details', { class: 'mb-side-group', id: 'mb-subjects-wrap', 'data-side-section': 'subjects' }, sideSummary(section), nav)
           if (state.subjectID && placed.some(item => item.subject === state.subjectID)) wrap.open = true
           sections.push(wrap)
         }
       } else {
         if (!placed.length) nav.append(h('p', { class: 'cap mb-side-empty', text: '在「自定义侧边栏」里把条目拖进这个区块。' }))
-        sections.push(h('details', { class: 'mb-side-group', 'data-side-section': section.id, open: true }, h('summary', { text: section.label }), nav))
+        sections.push(h('details', { class: 'mb-side-group', 'data-side-section': section.id, open: true }, sideSummary(section), nav))
       }
     }
     sideScroll.replaceChildren(...sections)
@@ -390,7 +507,6 @@ export function mountMistakebook({ beforeEnter }) {
     const visibleIDs = new Set(rows.map(row => row.id))
     for (const id of state.selection) if (!visibleIDs.has(id)) state.selection.delete(id)
     heading.textContent = NOTE_TYPES[state.type]?.label || dictionary.get(state.nodeID) || dictionary.get(state.subjectID) || ({ all: '全部笔记', due: '今天，复习一点', mastered: '已经掌握', archived: '归档笔记', trash: '回收站' })[state.view]
-    subtitle.textContent = NOTE_TYPES[state.type]?.caption || (state.view === 'due' ? '先独立回忆，再展开答案与笔记核对。' : '记录问题，建立模型，积累自己的解题方法。')
     searchFilter.hidden = !(state.query || state.tag)
     document.getElementById('mb-search-filter-label').textContent = (state.query || state.tag) ? `${[state.query ? `搜索「${state.query}」` : '', state.tag ? `标签「${state.tag}」` : ''].filter(Boolean).join(' · ')} · ${rows.length} 个结果` : ''
     document.getElementById('mb-total').replaceChildren(h('strong', { text: rows.length }), h('span', { text: '篇笔记' }))
@@ -413,13 +529,18 @@ export function mountMistakebook({ beforeEnter }) {
         h('strong', { text: `已选 ${state.selection.size} 篇` }),
         button(allSelected ? '全不选' : '全选', () => { if (allSelected) state.selection.clear(); else for (const row of rows) state.selection.add(row.id); renderList() }, false, { class: 'btn ghost', id: 'mb-pick-all' }),
         h('span', { class: 'spacer' }),
+        state.view!=='trash'?button('编成试卷',()=>compilePaper(null,[...state.selection]),false,{id:'mb-batch-paper',disabled:!state.selection.size}):null,
         state.view === 'trash' ? button('恢复所选', () => performBatch('restore'), false, { id: 'mb-batch-restore', disabled: !state.selection.size }) : null,
         state.view === 'trash' ? button('彻底删除', () => performBatch('purge'), false, { class: 'btn ghost danger', id: 'mb-batch-purge', disabled: !state.selection.size }) : button('移入回收站', () => performBatch('delete'), false, { class: 'btn ghost danger', id: 'mb-batch-delete', disabled: !state.selection.size })))
     }
     for (const row of rows) {
       const picked = state.selection.has(row.id)
       const cardClass = `mb-card${!state.picking && state.draft?.id === row.id ? ' selected' : ''}${picked ? ' picked' : ''}`
-      const click = () => state.picking ? togglePick(row.id) : select(row.id)
+      const click = event => {
+        if(state.picking)return togglePick(row.id)
+        if(event.detail===0)return select(row.id)
+        for(const card of list.querySelectorAll('[data-question-id]')){const on=card.dataset.questionId===row.id;card.classList.toggle('selected',on);card.setAttribute('aria-pressed',String(on))}
+      }
       const props = { class: cardClass, 'data-question-id': row.id, 'aria-pressed': String(state.picking ? picked : state.draft?.id === row.id) }
       const check = state.picking ? h('span', { class: `mb-check${picked ? ' on' : ''}`, 'aria-hidden': 'true' }, picked ? '✓' : '') : null
       if (row.type === 'vocabulary') {
@@ -432,7 +553,7 @@ export function mountMistakebook({ beforeEnter }) {
         const card = button([check,
           h('div', { class: 'mb-card-head' }, h('span', { class: `mb-type-label ${row.type}`, text: NOTE_TYPES[row.type]?.label || '错题' }), h('span', { class: 'spacer' }), h('span', { class: `mb-state ${row.reviewState}`, text: labelStates[row.reviewState] })),
           h('h2', { text: row.title || row.vocabulary?.word || row.stem.split('\n')[0].slice(0,90) || (row.imageCount ? '手写页' : '图片笔记') }),
-          h('p', { class: 'mb-card-stem', text: (row.type==='note' ? (row.imageCount ? (row.stem ? `${row.imageCount} 页手写 · ${row.stem.replace(/\s+/g,' ').slice(0,60)}` : `${row.imageCount} 页手写`) : row.stem||row.physics?.object||row.method?.prerequisites||'打开笔记补充内容。') : row.type==='vocabulary'?row.vocabulary.meaning:row.stem||row.physics?.object||row.method?.prerequisites||'打开笔记补充内容。').replace(/\s+/g,' ').slice(0,180) }),
+          h('p', { class: 'mb-card-stem', text: row.type==='paper'?`${row.questions.length} 道题 · ${row.questions.slice(0,3).map(item=>item.title||item.stem.split('\n')[0]).join(' / ')}`:(row.type==='note' ? (row.imageCount ? (row.stem ? `${row.imageCount} 页手写 · ${row.stem.replace(/\s+/g,' ').slice(0,60)}` : `${row.imageCount} 页手写`) : row.stem||row.physics?.object||row.method?.prerequisites||'打开笔记补充内容。') : row.type==='vocabulary'?row.vocabulary.meaning:row.stem||row.physics?.object||row.method?.prerequisites||'打开笔记补充内容。').replace(/\s+/g,' ').slice(0,180) }),
           h('div', { class: 'mb-card-tags' }, row.subjectID ? h('span',{text:dictionary.get(row.subjectID)}) : null, row.nodeID ? h('span', { text: dictionary.get(row.nodeID) }) : null, row.tags.slice(0, 3).map(tag => h('span', { class: 'mb-card-tag', text: `# ${tag}` })), row.imageCount ? h('span', { text: `${row.imageCount} 页手写` }) : null, row.errorType ? h('span', { text: row.errorType }) : null),
           h('div', { class: 'mb-card-foot' }, h('span', { class: `mb-score ${row.value.level}`, text: `复习优先 ${score}` }), h('span', { text: `更新于 ${date(row.updatedAt)}` })),
         ], click, false, props)
@@ -440,19 +561,52 @@ export function mountMistakebook({ beforeEnter }) {
       }
     }
   }
-  async function select(id) {
+  async function select(id,parent=null) {
     if (!await discard()) return
-    state.draft = await call('read', { id }); state.dirty = false; state.review = state.view === 'due'; state.showAnswer = false
-    renderList(); renderDetail()
+    const loaded=await call('read',{id})
+    if(!loaded||!NOTE_TYPES[loaded.type]||!Array.isArray(loaded.images)||(loaded.type==='paper'&&!Array.isArray(loaded.questions)))throw new Error('笔记未能完整加载，请返回列表后重试')
+    paperParent=parent
+    state.draft = loaded; state.dirty = false; state.review = false; state.showAnswer = false; state.page = 'view'
+    shell.classList.add('detail-full');shell.classList.remove('keep-side')
+    try{renderList();renderDetail()}catch(error){state.draft=null;state.dirty=false;renderList();renderDetail();throw error}
   }
+  const papers=createPapers({h,icon,button,dialog,call,renderRich,
+    onSaved:async paper=>{state.view='all';state.type='paper';state.subjectID='';state.nodeID='';state.query='';state.tag='';search.value='';state.picking=false;state.selection.clear();state.draft=paper;state.page='view';state.review=false;state.dirty=false;paperParent=null;await load();notify('试卷已保存')},
+    onQuestion:async(id,parent)=>{await select(id,parent)},
+    onDissolve:async paper=>{await call('action',{id:paper.id,action:'delete'});state.draft=null;state.type='';state.dirty=false;await load();notify('已拆开试卷，原题与复习记录保留')},
+  })
+  async function compilePaper(existing=null,initial=[]){if(!await discard())return;return papers.compile(existing,initial)}
+  const backToLibrary=async()=>{
+    if(!await discard())return
+    if(paperParent){const id=paperParent;paperParent=null;await select(id);return}
+    state.draft=null;state.dirty=false;state.review=false;renderList();renderDetail()
+  }
+  const annotate=async draft=>{
+    if(!draft.id||state.dirty)throw new Error('请先保存正文，再添加批注')
+    const selection=window.getSelection(),anchor=selection?.anchorNode
+    const quote=anchor&&document.querySelector('#mb-note-view')?.contains(anchor)?selection.toString().slice(0,2000):''
+    const input=h('textarea',{class:'area',id:'mb-annotation-text',placeholder:'写下批注…','aria-label':'批注内容'})
+    const node=dialog('笔记批注',h('div',{class:'mb-paper-form'},quote?h('blockquote',{text:quote}):null,input,button('保存批注',async()=>{
+      if(!input.value.trim())throw new Error('请填写批注')
+      const annotations=[...(draft.annotations??[]),{id:crypto.randomUUID(),text:input.value.trim(),quote,createdAt:new Date().toISOString()}]
+      state.draft=await call('save',{...draft,annotations,images:draft.images.map(image=>({id:image.id}))});node.close();await load();notify('批注已保存')
+    },true,{id:'mb-annotation-save'})))
+    input.focus()
+  }
+  const focusToolbar=(draft,{editing=false}={})=>h('div',{class:'mb-focus-toolbar',role:'toolbar','aria-label':'笔记操作'},
+    button(icon('chevron-right'),backToLibrary,false,{class:'icon-button mb-focus-back',id:'mb-back','aria-label':'返回',title:'返回 · Esc','data-glass-surface':'float'}),
+    h('div',{class:'mb-focus-actions','data-glass-surface':'float'},
+      button(icon('sparkles'),showAISide,false,{class:'icon-button',id:'mb-note-ai','aria-label':'AI 查询',title:'AI 查询'}),
+      button(icon('conversation'),()=>annotate(draft),false,{class:'icon-button',id:'mb-annotate','aria-label':'笔记批注',title:'笔记批注',disabled:!draft.id||editing}),
+      button(icon(editing?'check':'pen'),async()=>{if(draft.type==='paper')return compilePaper(draft);if(editing){await save();state.page='view'}else{state.review=false;state.page='edit'}renderDetail()},false,{class:'icon-button',id:editing?'mb-save':'mb-edit','aria-label':editing?'保存笔记':'编辑',title:editing?'保存笔记':'编辑'})))
   async function openCreate() {
     if (!await discard()) return
-    const node=dialog('新建笔记',h('div',{class:'mb-create-types'},Object.entries(NOTE_TYPES).map(([type,meta])=>button([icon(meta.icon),h('strong',{text:meta.label}),h('span',{class:'cap',text:meta.caption})],async()=>{node.close();await newQuestion(type)},false,{class:'mb-create-type','data-create-type':type}))))
+    const node=dialog('新建笔记',h('div',{class:'mb-create-types'},NEW_NOTE_TYPES.map(type=>{const meta=NOTE_TYPES[type];return button([icon(meta.icon),h('strong',{text:meta.label}),h('span',{class:'cap',text:meta.caption})],async()=>{node.close();await newQuestion(type)},false,{class:'mb-create-type','data-create-type':type})})))
   }
   async function newQuestion(type = state.type || 'note') {
     if (!await discard()) return
     state.draft = { type, title:'', physics:normalizeFields('physics'),method:normalizeFields('method'),vocabulary:normalizeFields('vocabulary'),simulationId:'',stem: '', studentWork: '', referenceAnswer: '', notes: '', cause: '', errorType: '', nodeID: '', subjectID: type==='physics'?'physics':type==='vocabulary'?'english':state.subjectID, target: 'gaokao', images: [], tags: [], reviewState: 'new', repeatCount: 0, mastery: 0 }
-    state.dirty = false; state.review = false; renderList(); renderDetail(); setTimeout(()=>document.querySelector(`[data-mb-field="${type==='vocabulary'?'vocabulary.word':'title'}"]`)?.focus(),0)
+    state.dirty = false; state.review = false; state.page = 'edit'; renderList(); renderDetail(); setTimeout(()=>document.querySelector(`[data-mb-field="${type==='vocabulary'?'vocabulary.word':'title'}"]`)?.focus(),0)
   }
   async function save() {
     const draft = state.draft; if (!draft) return
@@ -483,9 +637,104 @@ export function mountMistakebook({ beforeEnter }) {
     if (state.draft) { state.review = true; state.showAnswer = false }
     await load(); notify(({ pass: '复习已记录，下次按计划再来', fail: '已记录薄弱点，明天再练一次', delete: '已移入回收站', restore: '题目已恢复', archive: '已归档', unarchive: '已取消归档', purge: '题目已永久删除' })[action])
   }
+  // —— 查看页：整块 Markdown + LaTeX，与编辑表单分离 ——
+  const noteMarkdown = draft => {
+    const parts = []
+    const push = (label, value) => { if (String(value ?? '').trim()) parts.push(`## ${label}\n\n${String(value).trim()}`) }
+    if (draft.type === 'vocabulary') {
+      const vocabulary = draft.vocabulary ?? {}
+      const head = [vocabulary.word, vocabulary.phonetic, vocabulary.partOfSpeech].filter(Boolean).join(' · ')
+      if (head) parts.push(`**${head}**`)
+      if (vocabulary.meaning) parts.push(String(vocabulary.meaning).trim())
+    } else if (String(draft.stem ?? '').trim()) parts.push(String(draft.stem).trim())
+    if (draft.type === 'mistake') {
+      push('我的作答', draft.studentWork)
+      push('参考答案', draft.referenceAnswer)
+      if (draft.errorType) push('错因类型', draft.errorType)
+      push('错因与复盘', draft.cause)
+    } else {
+      for (const [key, label] of STRUCTURED_FIELDS[draft.type] ?? []) push(label, draft[draft.type]?.[key])
+      push('备注', draft.notes)
+    }
+    return parts.length ? parts.join('\n\n') : '（这篇笔记还没有正文，点「编辑」写点什么。）'
+  }
+  const closeButton = () => {
+    const close = button('', async () => {
+      if (!await discard()) return
+      shell.classList.remove('detail-full', 'keep-side')
+      state.draft = null; state.dirty = false
+      renderList(); renderDetail()
+    }, false, { class: 'icon-button', 'aria-label': '关闭题目' })
+    close.append(icon('close'))
+    return close
+  }
+  const readSidebarPref = () => localStorage.getItem('alaya.notebook.readSidebar') === '1'
+  const fullscreenButton = () => {
+    const on = shell.classList.contains('detail-full')
+    const fullscreen = button('', () => {
+      shell.classList.toggle('detail-full')
+      // 全屏时是否保留侧栏由偏好决定；退出时一并清掉，避免留下半隐藏状态。
+      if (shell.classList.contains('detail-full')) shell.classList.toggle('keep-side', readSidebarPref())
+      else shell.classList.remove('keep-side')
+      renderDetail()
+      notify(shell.classList.contains('detail-full') ? '已进入全屏查看，Esc 退出' : '已退出全屏')
+      setTimeout(() => document.querySelector('#mb-fullscreen')?.focus(), 0)
+    }, false, {
+      class: 'icon-button', id: 'mb-fullscreen',
+      title: on ? '退出全屏（Esc）' : '全屏查看（F）',
+      'aria-label': on ? '退出全屏查看' : '全屏查看',
+      'aria-pressed': String(on),
+    })
+    fullscreen.append(icon(on ? 'minimize' : 'maximize'))
+    return fullscreen
+  }
+  async function toggleReview(draft) {
+    if (!await discard()) return
+    state.draft = await call('read', { id: draft.id })
+    state.dirty = false
+    state.review = !state.review
+    state.showAnswer = false
+    if (!state.review) state.page = 'edit'
+    renderDetail()
+  }
+  function renderNoteView(draft) {
+    const nodes = state.data.taxonomy.nodes
+    const subject = nodes.find(node => node.id === draft.subjectID)?.name ?? ''
+    const node = nodes.find(row => row.id === draft.nodeID)?.name ?? ''
+    const edited = draft.updatedAt ? new Date(draft.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
+    const chip = text => h('span', { class: 'mb-note-tag', text })
+    const meta = h('div', { class: 'mb-note-meta' },
+      subject ? chip(subject) : null,
+      node && node !== subject ? chip(node) : null,
+      ...(draft.tags ?? []).map(chip),
+      draft.repeatCount ? h('span', { class: 'cap', text: `复习 ${draft.repeatCount} 次` }) : null,
+      edited ? h('span', { class: 'cap', text: `更新于 ${edited}` }) : null)
+    const head=focusToolbar(draft)
+    const article = h('article', { class: 'mb-note-view', id: 'mb-note-view' },
+      h('div', { class: 'mb-note-body' },h('h1',{class:'mb-reading-title',text:draft.title||draft.vocabulary?.word||'未命名笔记'}),renderRich(noteMarkdown(draft)),
+        draft.annotations?.length?h('section',{class:'mb-annotations'},h('h2',{text:'批注'}),draft.annotations.map(item=>h('div',{class:'mb-annotation'},item.quote?h('blockquote',{text:item.quote}):null,h('p',{text:item.text})))):null,
+        button('开始复习',()=>toggleReview(draft),false,{id:'mb-start-review',class:'btn ghost'})),
+      draft.images?.length ? h('div', { class: 'mb-note-images' }, draft.images.map(image => h('figure', {},
+        h('img', { src: `data:${image.mimeType};base64,${image.data}`, alt: image.name || '笔记图片', loading: 'lazy' }),
+        image.name ? h('figcaption', { text: image.name }) : null))) : null)
+    detail.replaceChildren(head, meta, article)
+  }
   function renderDetail() {
     const draft = state.draft; detail.hidden = !draft; detailSplitter.hidden = !draft; shell.classList.toggle('with-question', Boolean(draft))
-    if (!draft) { detail.replaceChildren(); return }
+    if (!draft) {
+      // 关闭详情时必须把全屏状态一起复位，否则主列表仍被 display:none 挡住，只剩白底。
+      shell.classList.remove('detail-full', 'keep-side')
+      detail.replaceChildren()
+      return
+    }
+    shell.classList.add('detail-full');shell.classList.remove('keep-side')
+    // 查看页与编辑页分离：已保存的笔记默认只读渲染，编辑需要显式进入。
+    if(draft.type==='paper'){
+      const reader=papers.render(draft)
+      if(draft.annotations?.length)reader.append(h('section',{class:'mb-annotations'},h('h2',{text:'批注'}),draft.annotations.map(item=>h('div',{class:'mb-annotation'},h('p',{text:item.text})))))
+      detail.replaceChildren(focusToolbar(draft),reader);return
+    }
+    if (!state.review && draft.id && state.page !== 'edit') { renderNoteView(draft);return }
     const control = (name, rows = 3) => {
       const path=name.split('.'), get=()=>path.reduce((value,key)=>value?.[key],draft)
       return h(rows===1?'input':'textarea', { class: rows===1?'input':'area', rows:rows===1?undefined:rows, value:get()||'', 'data-mb-field':name, onInput:event=>{const parent=path.length===1?draft:draft[path[0]];parent[path.at(-1)]=event.target.value;dirty()} })
@@ -497,10 +746,8 @@ export function mountMistakebook({ beforeEnter }) {
     if (draft.errorType && !errors.includes(draft.errorType)) errors.push(draft.errorType)
     const errorType = h('select', { class: 'select', 'data-mb-field': 'errorType', onChange: event => { draft.errorType = event.target.value; dirty() } }, errors.map(label => h('option', { value: label === '未记录' ? '' : label, text: label, selected: (label === '未记录' ? '' : label) === draft.errorType ? 'selected' : undefined })))
     const target = h('select', { class: 'select', 'data-mb-field': 'target', onChange: event => { draft.target = event.target.value; dirty() } }, [['gaokao','高考'],['huige','合格考']].map(([value, text]) => h('option', { value, text, selected: value === draft.target ? 'selected' : undefined })))
-    const close = button('', async () => { if (await discard()) { state.draft = null; state.dirty = false; renderList(); renderDetail() } }, false, { class: 'icon-button', 'aria-label': '关闭题目' }); close.append(icon('close'))
-    const fullscreen = button('', () => { shell.classList.toggle('detail-full'); renderDetail() }, false, { class: 'icon-button', id: 'mb-fullscreen', title: '全屏编辑（Esc 退出）', 'aria-label': '全屏编辑', 'aria-pressed': String(shell.classList.contains('detail-full')) }); fullscreen.append(icon('grid'))
-    const head = h('div', { class: 'mb-detail-head' }, h('div', {}, h('span', { class: 'eyebrow', text: state.review ? '复习' : NOTE_TYPES[draft.type].label }), h('h2', { text: draft.id ? state.review ? '独立回忆，再核对' : draft.title || draft.vocabulary?.word || '笔记详情' : `新建${NOTE_TYPES[draft.type].label}` })), fullscreen, close)
-    const actions = h('div', { class: 'row mb-save-actions' }, h('span', { id: 'mb-save-state', class: state.dirty ? 'cap dirty' : 'cap', role: 'status', 'aria-live': 'polite', text: state.dirty ? '有未保存的修改' : draft.id ? '已保存' : '尚未保存' }), h('span', { class: 'spacer' }), button('保存笔记', save, true, { id: 'mb-save', disabled: !state.dirty && Boolean(draft.id), title: '保存笔记 · Ctrl / ⌘ S' }),button(draft.type==='physics'?'AI 构建与推导':draft.type==='vocabulary'?'AI 补全词条':'AI 自动解答', solveAI,false,{id:'mb-ai-solve'}))
+    const head=focusToolbar(draft,{editing:!state.review})
+    const actions=h('span',{id:'mb-save-state',class:'mb-editor-save-state',role:'status','aria-live':'polite',text:state.dirty?'有未保存的修改':draft.id?'已保存':'尚未保存'})
     const form = h('form', { class: 'mb-editor-form', onSubmit: event => { event.preventDefault(); void guard(save) } })
     if (state.review) {
       form.append(h('h3',{class:'mb-review-title',text:draft.title||draft.vocabulary?.word||NOTE_TYPES[draft.type].label}),h('div', { class: 'mb-review-stem', text: draft.type==='vocabulary'?draft.vocabulary.word:draft.stem || draft.physics?.object || '请查看笔记原图' }))
@@ -549,9 +796,9 @@ export function mountMistakebook({ beforeEnter }) {
       const tools = h('div', { class: 'row mb-detail-actions' })
       if (draft.isSoftDeleted) tools.append(button('恢复', () => perform('restore')), button('永久删除', () => perform('purge'), false, { class: 'btn danger' }))
       else {
-        for (const tool of [button(state.review ? '退出复习' : '开始复习', async () => { if (await discard()) { state.draft = await call('read',{id:draft.id}); state.dirty=false; state.review=!state.review; state.showAnswer=false; renderDetail() } }, false, { id: 'mb-start-review' }),
+        for (const tool of [button(state.review ? '退出复习' : '开始复习', () => { void toggleReview(draft) }, false, { id: 'mb-start-review' }),
           draft.type === 'vocabulary' ? button('关联树', () => { if (state.dirty) throw new Error('请先保存修改，再查看关联树'); void openRelationTree(draft) }, false, { id: 'mb-relations', title: '按近义词、反义词与词形变化展开这棵词库关系树' }) : null,
-          button(draft.isArchived ? '取消归档' : '归档', () => perform(draft.isArchived ? 'unarchive' : 'archive')), button('移到回收站', () => perform('delete'), false, { class: 'btn ghost danger', id: 'mb-delete' })]) if (tool) tools.append(tool)
+          button('移到回收站', () => perform('delete'), false, { class: 'btn ghost danger', id: 'mb-delete' })]) if (tool) tools.append(tool)
         if (!draft.isArchived && draft.type==='mistake') tools.append(button('辅助分析错因', async () => {
           if (state.dirty) throw new Error('请先保存题目再分析')
           const settings = await call('settings')
@@ -873,19 +1120,25 @@ export function mountMistakebook({ beforeEnter }) {
     dialog(image.name, h('div', { class: 'mb-image-preview' }, h('img', { src: dataURL(image), alt: image.name })), true)
   }
   async function openSettings() {
+    const opener=document.activeElement
     const config = await call('settings'), info = (await window.vault.info()).result
     const endpoint = h('input', { class: 'input', value: config.endpoint, id: 'mb-ocr-url' }), key = h('input', { type: 'password', class: 'input', autocomplete: 'new-password', placeholder: config.hasKey ? '已安全保存；留空保留' : '填写 GLM-OCR API Key', id: 'mb-ocr-key' }), clear = h('input', { type: 'checkbox' })
     const modelURL = h('input', { class: 'input', value: info.model?.baseUrl || '', placeholder: 'https://api.example.com/v1', id: 'mb-model-url' }), model = h('input', { class: 'input', value: info.model?.model || '', placeholder: '模型名称', id: 'mb-model-name' }), modelKey = h('input', { type: 'password', class: 'input', autocomplete: 'new-password', placeholder: info.hasKey ? '已安全保存；留空保留' : '模型 API Key' }), clearModel = h('input', { type: 'checkbox' })
-    const node = dialog('笔记本设置', h('div', { class: 'mb-settings-form' },
+    const serviceForm = h('div', { class: 'mb-settings-form' },
       h('h3', { text: '图片与 PDF 识别' }), h('p', { class: 'cap', text: '使用 GLM-OCR 版面解析接口。点击识别才会发送所选文件；识别结果可校对后导入。' }), field('OCR 接口地址', endpoint), field('OCR 密钥', key), h('label', { class: 'row cap' }, clear, '清除已保存的 OCR 密钥'),
       h('h3', { text: 'AI 解答、模型推导与英语检测' }), h('p', { class: 'cap', text: '支持兼容 OpenAI 的服务。仅在点击 AI 功能后发送所选笔记；有图片时需要支持图片输入的模型。模型配置与本程序的记忆模式共用。' }), field('模型服务地址', modelURL), field('模型名称', model), field('模型密钥', modelKey), h('label', { class: 'row cap' }, clearModel, '清除已保存的模型密钥'),
       button('保存设置', async () => {
         const reply = await window.vault.settings({ baseUrl: modelURL.value, model: model.value, apiKey: modelKey.value, clearKey: clearModel.checked }); if (!reply.ok) throw new Error(reply.error)
         await call('configure', { endpoint: endpoint.value, apiKey: key.value, clearKey: clear.checked }); key.value = ''; modelKey.value = ''; node.close(); notify('设置已安全保存')
-      }, true, { id: 'mb-config-save' }), h('h3', { text: '本地数据' }), h('p', { class: 'mb-data-path', text: config.path }), button('备份笔记本', async () => { if (await call('backup')) notify('笔记本已备份，包含原图') }), h('p', { class: 'cap', text: '笔记本使用独立数据库，不进入 Codex / DSH 的记忆上下文。' }),
-      h('h3', { text: '界面布局' }), h('p', { class: 'cap', text: '侧边栏与详情面板之间有可拖动的分隔条：按住拖动自由调整宽度，双击恢复默认。' }),
-      field('详情面板位置', h('select', { class: 'select', id: 'mb-detail-side', onChange: event => void guard(() => { const prefs = layoutPrefs(); prefs.detailSide = event.target.value; saveLayout(prefs); notify('布局已更新') }) }, [['right', '右侧（默认）'], ['left', '左侧']].map(([value, text]) => h('option', { value, text, selected: layoutPrefs().detailSide === value ? 'selected' : undefined })))),
-      button('恢复默认布局', () => { savePrefs({ ...prefsCache, ...LAYOUT_DEFAULTS }); notify('布局已恢复默认') }, false, { class: 'btn ghost', id: 'mb-layout-reset' })))
+      }, true, { id: 'mb-config-save' }), h('h3', { text: '本地数据' }), h('p', { class: 'mb-data-path', text: config.path }), button('备份笔记本', async () => { if (await call('backup')) notify('笔记本已备份，包含原图') }), h('p', { class: 'cap', text: '笔记本使用独立数据库，不进入 Codex / DSH 的记忆上下文。' }))
+    const tabs=settingsTabs([
+      {id:'appearance',label:'外观',icon:'sparkles',content:appearance.createPanel()},
+      {id:'layout',label:'布局',icon:'grid',content:embedLayout(notebookLayout.menu)},
+      {id:'connectors',label:'Codex 与 DSH',icon:'code',content:h('div',{class:'mb-paper-form'},h('h3',{text:'Codex / MCP'}),h('textarea',{class:'area config',readonly:true,value:info.connectors?.codex??'','aria-label':'Notebook Codex 接口配置'}),h('h3',{text:'DSH'}),h('textarea',{class:'area config',readonly:true,value:info.connectors?.dsh??'','aria-label':'Notebook DSH 接口配置'}))},
+      {id:'services',label:'服务与数据',icon:'settings',content:serviceForm},
+    ],{idPrefix:'mb-preferences'})
+    const node=dialog('设置',tabs,true)
+    node.addEventListener('close',()=>{if(opener?.isConnected)opener.focus({preventScroll:true})},{once:true})
   }
   async function openImport(initial = 'mistake') {
     if (!await discard()) return
@@ -1035,12 +1288,22 @@ export function mountMistakebook({ beforeEnter }) {
   }
   document.addEventListener('keydown', event => {
     if (document.body.dataset.mode !== 'mistakebook' || document.querySelector('dialog[open]')) return
+    // 画布打开时笔记列表/编辑器是隐藏的：Ctrl+N / Ctrl+F 等不能作用到看不见的 .mb-body。
+    if (canvasView?.isOpen()) return
     if (event.key === 'Escape' && state.picking) { state.picking = false; state.selection.clear(); renderList(); return }
-    if (event.key === 'Escape' && shell.classList.contains('detail-full')) { shell.classList.remove('detail-full'); renderDetail(); return }
+    if (event.key === 'Escape' && shell.classList.contains('detail-full')) { event.preventDefault();void guard(backToLibrary);return }
+    // F 切换全屏查看；只在没有焦点在输入框里时生效，避免把字母打进正文。
+    const typing = Boolean(event.target.closest?.('input, textarea, select, [contenteditable="true"]'))
+    if (!typing && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'f' && state.draft) {
+      event.preventDefault()
+      shell.classList.add('detail-full');shell.classList.remove('keep-side')
+      return
+    }
     if (event.ctrlKey || event.metaKey) {
       if (event.key.toLowerCase() === 'f') { event.preventDefault(); search.focus(); search.select() }
       if (event.key.toLowerCase() === 'n') { event.preventDefault(); void guard(openCreate) }
       if (event.key.toLowerCase() === 's' && state.draft && !state.review) { event.preventDefault(); void guard(save) }
     }
   })
+  return {open:enterNotebook,isOpen:()=>!shell.hidden,shell}
 }

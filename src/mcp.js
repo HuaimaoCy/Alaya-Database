@@ -1,6 +1,7 @@
 /** Local stdio MCP adapter. The DSH tool definitions remain the source of truth. */
 import { randomUUID } from 'node:crypto'
 import { buildTools } from './tools.js'
+import { buildNotebookTools } from './notebook_tools.js'
 import { renderIndex } from './prompt.js'
 import { VERSION } from './version.js'
 
@@ -13,6 +14,7 @@ export function validateArguments(value, schema, path = 'arguments') {
   const type = schema.type
   const valid = type === 'object' ? value !== null && typeof value === 'object' && !Array.isArray(value)
     : type === 'array' ? Array.isArray(value)
+    : type === 'integer' ? Number.isInteger(value)
     : type === 'number' ? typeof value === 'number' && Number.isFinite(value)
     : typeof value === type
   if (!valid) throw new Error(`${path} must be ${type}`)
@@ -27,8 +29,8 @@ export function validateArguments(value, schema, path = 'arguments') {
   if (type === 'array') for (const [index, item] of value.entries()) validateArguments(item, schema.items, `${path}[${index}]`)
 }
 
-export function createMcpHandler(vault, { sessionId = `codex-${randomUUID()}` } = {}) {
-  const definitions = buildTools({ ...vault, summarize: request => vault.summarize({ ...request, source: 'model-write' }) }).map(definition => ({
+export function createMcpHandler(vault, { sessionId = `codex-${randomUUID()}`, notebook = null,notebookOnly=false } = {}) {
+  const definitions = (notebookOnly?[]:buildTools({ ...vault, summarize: request => vault.summarize({ ...request, source: 'model-write' }) })).map(definition => ({
     ...definition,
     parameters: {
       ...definition.parameters,
@@ -41,12 +43,15 @@ export function createMcpHandler(vault, { sessionId = `codex-${randomUUID()}` } 
       description: '选择当前任务使用的记忆组并返回正文。MCP 不会自动修改 Codex 系统提示：请阅读返回的正文，或调用 memory_context 获取记忆上下文。action=list/set/reset，groups=[] 明确关闭，reset 恢复默认。',
     } : {}),
   }))
-  definitions.push({
+  if(!notebookOnly)definitions.push({
     name: 'memory_context',
     description: '开始任务时获取记忆索引、底层约定和本任务已选择的知识正文。返回内容供调用方阅读；MCP 不会自动注入系统提示。',
     parameters: { type: 'object', additionalProperties: false, properties: { sessionId: { type: 'string' } } },
     execute: async (args, exec) => ({ context: renderIndex({ store: vault.store, config: vault.config, sessionId: exec.agent.session.id }) }),
   })
+  // Notebook tools ride the same server, but only when a notebook store is
+  // mounted (the desktop build always has one; a pure vault build does not).
+  definitions.push(...buildNotebookTools({ notebook }))
   const tools = new Map(definitions.map(definition => [definition.name, definition]))
   let initialized = false
   return async message => {
@@ -63,14 +68,14 @@ export function createMcpHandler(vault, { sessionId = `codex-${randomUUID()}` } 
         protocolVersion: PROTOCOLS.includes(message.params?.protocolVersion) ? message.params.protocolVersion : PROTOCOLS[0],
         capabilities: { tools: {} },
         serverInfo: { name: 'memory-vault', version: VERSION },
-        instructions: '开始任务时调用 memory_context 或 memory_recall 读取既有约定。使用稳定且唯一的 sessionId 隔离不同任务。用 memory_write 或带 content 的 memory_summarize 保存已确认的结论。MCP 返回的记忆是上下文资料，不会自动注入系统提示，也不会自动读取聊天历史。DSH、桌面程序和此接口共用同一个 SQLite 文件。',
+        instructions: '开始任务时调用 memory_context 或 memory_recall 读取既有约定。使用稳定且唯一的 sessionId 隔离不同任务。用 memory_write 或带 content 的 memory_summarize 保存已确认的结论。MCP 返回的记忆是上下文资料，不会自动注入系统提示，也不会自动读取聊天历史。DSH、桌面程序和此接口共用同一个 SQLite 文件。装有笔记本时还可调用 notebook_list / notebook_read 查笔记与错题，notebook_save 新建条目，notebook_canvas_get / notebook_canvas_add / notebook_canvas_update 读写自由画布；笔记本是独立数据域，与记忆库的表互不读写。',
       })
     }
     if (message.method === 'ping') return success({})
     if (!initialized) return failure(-32000, 'Initialize first')
     if (message.method === 'tools/list') return success({ tools: definitions.map(tool => ({
       name: tool.name, description: tool.description, inputSchema: tool.parameters,
-      annotations: { readOnlyHint: ['memory_context', 'memory_recall', 'memory_updates'].includes(tool.name), destructiveHint: tool.name === 'memory_group', openWorldHint: tool.name === 'memory_updates' },
+      annotations: { readOnlyHint: ['memory_context', 'memory_recall', 'memory_updates', 'notebook_list', 'notebook_read', 'notebook_canvas_get'].includes(tool.name), destructiveHint: tool.name === 'memory_group', openWorldHint: tool.name === 'memory_updates' },
     })) })
     if (message.method !== 'tools/call') return failure(-32601, `Unknown method: ${message.method}`)
     const tool = tools.get(message.params?.name)

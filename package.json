@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-vault",
-  "version": "0.7.15",
+  "version": "0.7.23",
   "description": "Independent knowledge and memory vault with a desktop app, Codex MCP, a DSH plugin, CLI and local RPC sharing one SQLite database.",
   "type": "module",
   "main": "index.js",
@@ -21,6 +21,11 @@
     "bin",
     "src",
     "docs",
+    "skills",
+    ".zcode-plugin",
+    ".codex-plugin",
+    ".mcp.json",
+    "marketplace.json",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md"
@@ -49,11 +54,29 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "test": "node --no-warnings tests/smoke.mjs && node --no-warnings tests/core-smoke.mjs && node --no-warnings tests/serve-real.mjs && node --no-warnings tests/desktop-smoke.mjs && node --no-warnings tests/mcp-smoke.mjs && node --no-warnings tests/standalone-smoke.mjs && node --no-warnings tests/updates-smoke.mjs && node --no-warnings tests/images-smoke.mjs",
+    "test": "node --no-warnings tests/plugin-manifests.mjs && node --no-warnings tests/smoke.mjs && node --no-warnings tests/core-smoke.mjs && node --no-warnings tests/serve-real.mjs && node --no-warnings tests/desktop-smoke.mjs && node --no-warnings tests/mcp-smoke.mjs && node --no-warnings tests/standalone-smoke.mjs && node --no-warnings tests/updates-smoke.mjs && node --no-warnings tests/images-smoke.mjs && node --no-warnings tests/glass-smoke.mjs",
+    "preview": "node tests/preview-app.mjs --serve",
+    "shot": "node tests/preview-app.mjs --shot test-tmp/preview/ui.png",
+    "shot:glass": "node tests/preview-glass.mjs",
+    "test:acceptance": "node tests/preview-acceptance.mjs",
     "desktop": "npm --prefix desktop start",
     "build:desktop": "npm --prefix desktop run build",
     "mcp": "node --no-warnings bin/memory-vault.mjs mcp",
     "test:mistakebook": "node --no-warnings tests/mistakebook-smoke.mjs",
-    "test:notebook": "node --no-warnings tests/notebook-smoke.mjs"
+    "test:notebook": "node --no-warnings tests/notebook-smoke.mjs",
+    "test:palette": "node tests/run-desktop-palette.mjs",
+    "test:palette:browser": "node tests/run-palette-browser.mjs",
+    "test:views": "node --no-warnings tests/views-smoke.mjs && node tests/run-desktop-views.mjs && node tests/run-desktop-views-scope.mjs",
+    "test:canvas": "node --no-warnings tests/canvas-smoke.mjs && node tests/run-desktop-canvas.mjs && node tests/run-desktop-canvas-undo.mjs",
+    "test:capture": "node --no-warnings tests/capture-smoke.mjs && node --no-warnings tests/run-desktop-capture-app.mjs",
+    "test:capture:module": "node --no-warnings tests/run-desktop-capture.mjs",
+    "test:optical": "node tests/optical-smoke.mjs",
+    "test:perf": "node tests/preview-perf.mjs",
+    "test:webgl": "node tests/preview-webgl.mjs",
+    "test:liquid-glass": "node tests/preview-liquid-glass.mjs",
+    "test:liquid-glass:desktop": "node tests/run-desktop-liquid-glass.mjs",
+    "test:liquid-motion": "node tests/preview-liquid-motion.mjs",
+    "test:workspace-ui": "node tests/preview-workspace-ui.mjs",
+    "test:papers": "node --no-warnings tests/papers-smoke.mjs"
   }
 }

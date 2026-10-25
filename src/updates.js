@@ -1,6 +1,9 @@
 import { VERSION } from './version.js'
 
-export const RELEASE_REPOSITORY = 'HuaimaoCy/dsh-memory-vault'
+// 发布与更新源统一在 Alaya 仓库：笔记本版本打 notebook-vX.Y.Z 标签、安装包与
+// latest.json 随该 release 发布；数据库核心版本打 database-vX.Y.Z 标签。为了让
+// releases/latest 始终可用，仓库里的每份 release 都会附带 latest.json。
+export const RELEASE_REPOSITORY = 'HuaimaoCy/Alaya-Database'
 export const DEFAULT_UPDATE_URL = `https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/latest.json`
 export const MAX_INSTALLER_BYTES = 1024 * 1024 * 1024
 
@@ -11,19 +14,31 @@ export function updateUrl(value) {
   return url.href
 }
 function versionParts(value) {
-  if (typeof value !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)) throw new Error('更新版本号格式无效')
-  const parts = value.split('.').map(Number)
+  const match=typeof value==='string'&&value.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/)
+  if(!match)throw new Error('更新版本号格式无效')
+  const parts=match.slice(1,4).map(Number),pre=match[4]?.split('.')??null
   if (parts.some(part => !Number.isSafeInteger(part))) throw new Error('更新版本号超出范围')
-  return parts
+  if(pre?.some(part=>/^\d+$/.test(part)&&(!Number.isSafeInteger(Number(part))||part.length>1&&part[0]==='0')))throw new Error('预览版本号格式无效')
+  return {parts,pre}
 }
 export function compareVersions(left, right) {
   const a = versionParts(left), b = versionParts(right)
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1
+  for (let i = 0; i < 3; i++) if (a.parts[i] !== b.parts[i]) return a.parts[i] > b.parts[i] ? 1 : -1
+  if(!a.pre||!b.pre)return a.pre? -1:b.pre?1:0
+  for(let i=0;i<Math.max(a.pre.length,b.pre.length);i++){
+    const x=a.pre[i],y=b.pre[i]
+    if(x===y)continue
+    if(x===undefined||y===undefined)return x===undefined?-1:1
+    const nx=/^\d+$/.test(x),ny=/^\d+$/.test(y)
+    if(nx&&ny)return Number(x)>Number(y)?1:-1
+    if(nx!==ny)return nx?-1:1
+    return x>y?1:-1
+  }
   return 0
 }
 export function parseRelease(value, platform = `${process.platform}-${process.arch}`) {
   if (!value || value.schemaVersion !== 1 || value.product !== 'memory-vault' || value.channel !== 'stable') throw new Error('更新清单与此软件不匹配')
-  versionParts(value.version)
+  if(versionParts(value.version).pre)throw new Error('稳定更新不接受预览版')
   const asset = value.assets?.[platform]
   if (!asset) throw new Error(`此更新没有适用于 ${platform} 的安装包`)
   if (typeof asset.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(asset.sha256)) throw new Error('安装包校验信息无效')
